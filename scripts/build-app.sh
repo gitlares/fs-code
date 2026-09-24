@@ -12,6 +12,12 @@ sparkle_framework="$repo_dir/.build/artifacts/sparkle/Sparkle/Sparkle.xcframewor
 feed_url="${FS_CODE_SU_FEED_URL:-}"
 public_key="${FS_CODE_SU_PUBLIC_ED_KEY:-}"
 signing_identity="${FS_CODE_SIGN_IDENTITY:-}"
+signing_keychain="${FS_CODE_SIGN_KEYCHAIN:-}"
+signing_keychain_args=()
+
+if [[ -n "$signing_keychain" ]]; then
+    signing_keychain_args=(--keychain "$signing_keychain")
+fi
 
 if [[ -n "$feed_url" || -n "$public_key" ]]; then
     if [[ -z "$feed_url" || -z "$public_key" || ! "$feed_url" =~ ^https://[^[:space:]/?#]+(/|$) ]]; then
@@ -52,13 +58,15 @@ if [[ -z "$signing_identity" ]]; then
 fi
 
 sign_runtime() {
-    codesign --force --sign "$signing_identity" --options runtime --timestamp "$1"
+    codesign --force --sign "$signing_identity" --options runtime --timestamp \
+        "${signing_keychain_args[@]}" "$1"
 }
 
 sparkle_dir="$app_dir/Contents/Frameworks/Sparkle.framework/Versions/B"
 sign_runtime "$sparkle_dir/XPCServices/Installer.xpc"
 codesign --force --sign "$signing_identity" --options runtime --timestamp \
-    --preserve-metadata=entitlements "$sparkle_dir/XPCServices/Downloader.xpc"
+    --preserve-metadata=entitlements "${signing_keychain_args[@]}" \
+    "$sparkle_dir/XPCServices/Downloader.xpc"
 sign_runtime "$sparkle_dir/Autoupdate"
 sign_runtime "$sparkle_dir/Updater.app"
 sign_runtime "$app_dir/Contents/Resources/SwiftTerm_SwiftTerm.bundle"

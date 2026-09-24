@@ -16,11 +16,13 @@ Install your Developer ID Application certificate/private key in your macOS Keyc
 
 ```sh
 export FS_CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+# Optional: restrict codesign identity lookup to one keychain.
+export FS_CODE_SIGN_KEYCHAIN="/path/to/selected.keychain-db"
 export FS_CODE_NOTARY_PROFILE="your-notary-profile"
 bash scripts/release-sign.sh
 ```
 
-`FS_CODE_SIGN_IDENTITY` may also be an unambiguous certificate hash. The script signs nested Sparkle components, the SwiftTerm resource bundle, the framework, and the application with hardened runtime and a secure timestamp. It then creates a ZIP, submits it to Apple, staples the ticket, and recreates the ZIP. If `FS_CODE_NOTARY_PROFILE` is omitted, the artifact is signed but **not notarized**.
+`FS_CODE_SIGN_IDENTITY` may also be an unambiguous certificate hash. Set `FS_CODE_SIGN_KEYCHAIN` only when identity lookup must be restricted to a specific keychain; the script does not choose one by default. The script signs nested Sparkle components, the SwiftTerm resource bundle, the framework, and the application with hardened runtime and a secure timestamp. It then creates an architecture-specific ZIP, submits it to Apple, staples the ticket, and recreates the ZIP. If `FS_CODE_NOTARY_PROFILE` is omitted, the artifact is signed but **not notarized**.
 
 Verify before publishing:
 

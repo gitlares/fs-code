@@ -15,7 +15,7 @@ fi
 FS_CODE_SIGN_IDENTITY="$signing_identity" bash "$repo_dir/scripts/build-app.sh"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_dir/Contents/Info.plist")"
 mkdir -p "$release_dir"
-archive="$release_dir/FS-Code-$version.zip"
+archive="$release_dir/FS-Code-$version-$(uname -m).zip"
 
 package_archive() {
     rm -f "$archive"
