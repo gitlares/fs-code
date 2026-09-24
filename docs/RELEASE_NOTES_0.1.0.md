@@ -7,7 +7,8 @@ First public preview of a native macOS code editor built around visible, editabl
 - macOS 15 or later.
 - Apple Silicon (arm64) build. Intel binaries are not included in this release.
 - Extract the ZIP and move FS Code.app to Applications.
-- Signing and notarization status is recorded on the GitHub release after verification.
+- Developer ID signed and notarized by Apple; the ticket is stapled to the application. Gatekeeper verification passed.
+- [Download and SHA-256 checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.0-alpha.1).
 
 ## Included
 
