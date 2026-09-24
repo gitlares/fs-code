@@ -1,0 +1,15 @@
+.build/
+.DS_Store
+dist/
+.codebase-memory/
+core/target/
+.fs/
+.fscode/
+.preview-check/
+test.txt
+.env
+.env.*
+*.p12
+*.p8
+*.mobileprovision
+*.key

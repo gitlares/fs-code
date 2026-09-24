@@ -1,0 +1,443 @@
+import Foundation
+
+/// An LLM client for OpenAI-compatible Chat Completions APIs.
+public struct OpenAIClient: LLMClient, ToolCallSurfacingClient, Sendable {
+    public let modelIdentifier: String?
+    public let maxTokens: Int
+    public let contextWindowSize: Int?
+    public let profile: OpenAIChatProfile
+    public let providerIdentifier: ProviderIdentifier
+    let apiKey: String?
+    let baseURL: URL
+    let chatCompletionPath: String
+    let additionalHeaders: @Sendable () -> [String: String]
+    let session: URLSession
+    let retryPolicy: RetryPolicy
+    let reasoningConfig: ReasoningConfig?
+    let assistantReplayProfile: OpenAIChatAssistantReplayProfile
+    let extraFields: [String: JSONValue]
+
+    public init(
+        apiKey: String? = nil,
+        model: String? = nil,
+        maxTokens: Int = 16384,
+        contextWindowSize: Int? = nil,
+        baseURL: URL,
+        chatCompletionPath: String = "chat/completions",
+        additionalHeaders: @Sendable @escaping () -> [String: String] = { [:] },
+        session: URLSession = .shared,
+        retryPolicy: RetryPolicy = .default,
+        reasoningConfig: ReasoningConfig? = nil,
+        profile: OpenAIChatProfile = .compatible,
+        providerIdentifier: ProviderIdentifier? = nil,
+        assistantReplayProfile: OpenAIChatAssistantReplayProfile = .conservative,
+        extraFields: [String: JSONValue] = [:]
+    ) {
+        self.apiKey = apiKey
+        modelIdentifier = model
+        self.maxTokens = maxTokens
+        self.contextWindowSize = contextWindowSize
+        self.baseURL = baseURL
+        self.chatCompletionPath = chatCompletionPath
+        self.additionalHeaders = additionalHeaders
+        self.session = session
+        self.retryPolicy = retryPolicy
+        self.reasoningConfig = reasoningConfig
+        self.profile = profile
+        self.providerIdentifier = providerIdentifier ?? profile.providerIdentifier
+        self.assistantReplayProfile = assistantReplayProfile
+        self.extraFields = extraFields
+    }
+
+    public func generate(
+        messages: [ChatMessage],
+        tools: [ToolDefinition],
+        responseFormat: ResponseFormat?,
+        requestContext: RequestContext?
+    ) async throws -> AssistantMessage {
+        try messages.validateForLLMRequest()
+        let request = try buildRequest(
+            messages: messages,
+            tools: tools,
+            responseFormat: responseFormat,
+            extraFields: requestContext?.extraFields ?? [:],
+            options: requestContext?.openAIChat
+        )
+        let urlRequest = try buildURLRequest(request)
+        let (data, httpResponse) = try await HTTPRetry.performData(
+            urlRequest: urlRequest, session: session, retryPolicy: retryPolicy
+        )
+        requestContext?.onResponse?(httpResponse)
+        return try parseResponse(data)
+    }
+
+    public func stream(
+        messages: [ChatMessage],
+        tools: [ToolDefinition],
+        requestContext: RequestContext?
+    ) -> AsyncThrowingStream<StreamDelta, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await performStreamRequest(
+                        messages: messages,
+                        tools: tools,
+                        options: requestContext?.openAIChat,
+                        extraFields: requestContext?.extraFields ?? [:],
+                        onResponse: requestContext?.onResponse,
+                        continuation: continuation
+                    )
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func transcribe(
+        audio: Data,
+        format: TranscriptionAudioFormat,
+        model: String,
+        options: TranscriptionOptions = TranscriptionOptions()
+    ) async throws -> String {
+        guard let apiKey else {
+            throw AgentError.llmError(.other("Transcription requires an API key"))
+        }
+        let request = buildTranscriptionURLRequest(
+            audio: audio,
+            format: format,
+            model: model,
+            options: options,
+            boundary: UUID().uuidString,
+            apiKey: apiKey
+        )
+        let (data, _) = try await HTTPRetry.performData(
+            urlRequest: request, session: session, retryPolicy: retryPolicy
+        )
+        return try parseTranscriptionResponse(data)
+    }
+
+    public func transcribe(
+        audioFileURL: URL,
+        format: TranscriptionAudioFormat,
+        model: String,
+        options: TranscriptionOptions = TranscriptionOptions()
+    ) async throws -> String {
+        guard let apiKey else {
+            throw AgentError.llmError(.other("Transcription requires an API key"))
+        }
+        let boundary = UUID().uuidString
+        let (request, bodyURL) = try buildTranscriptionURLRequest(
+            audioFileURL: audioFileURL,
+            format: format,
+            model: model,
+            options: options,
+            boundary: boundary,
+            apiKey: apiKey
+        )
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
+        return try await performUploadWithRetry(urlRequest: request, bodyFileURL: bodyURL) { data, _ in
+            try parseTranscriptionResponse(data)
+        }
+    }
+
+    func parseTranscriptionResponse(_ data: Data) throws -> String {
+        let decoder = JSONDecoder()
+        let response: TranscriptionResponse
+        do {
+            response = try decoder.decode(TranscriptionResponse.self, from: data)
+        } catch {
+            throw AgentError.llmError(.decodingFailed(error))
+        }
+        return response.text
+    }
+}
+
+extension OpenAIClient {
+    func buildRequest(
+        messages: [ChatMessage],
+        tools: [ToolDefinition],
+        stream: Bool = false,
+        responseFormat: ResponseFormat? = nil,
+        extraFields: [String: JSONValue] = [:],
+        options: OpenAIChatRequestOptions? = nil
+    ) throws -> ChatCompletionRequest {
+        let capabilities = OpenAIChatCapabilities.resolve(profile: profile)
+        let replayPolicy = OpenAIChatReplayPolicy.resolve(profile: assistantReplayProfile)
+        let requestTools = try buildTools(functionTools: tools, options: options, capabilities: capabilities)
+        let toolChoice = try resolveToolChoice(
+            requestTools: requestTools,
+            functionTools: tools,
+            options: options,
+            capabilities: capabilities
+        )
+        return try ChatCompletionRequest(
+            model: modelIdentifier,
+            messages: messages.map { try RequestMessage($0, replayPolicy: replayPolicy) },
+            tools: requestTools.isEmpty ? nil : requestTools,
+            toolChoice: toolChoice,
+            parallelToolCalls: options?.parallelToolCalls,
+            maxTokens: maxTokens,
+            tokenFieldName: capabilities.tokenLimitField.rawValue,
+            stream: stream ? true : nil,
+            streamOptions: stream ? StreamOptions(includeUsage: true) : nil,
+            responseFormat: responseFormat,
+            reasoning: reasoningConfig.map(RequestReasoning.init),
+            extraFields: self.extraFields.merging(extraFields) { $1 }
+        )
+    }
+
+    private func buildTools(
+        functionTools: [ToolDefinition],
+        options: OpenAIChatRequestOptions?,
+        capabilities: OpenAIChatCapabilities
+    ) throws -> [RequestTool] {
+        let functionRequestTools = try functionTools.map { try RequestTool($0, profile: capabilities.profile) }
+        let customRequestTools = try (options?.customTools ?? []).map {
+            try RequestTool(custom: $0, profile: capabilities.profile)
+        }
+        return functionRequestTools + customRequestTools
+    }
+
+    private func resolveToolChoice(
+        requestTools: [RequestTool],
+        functionTools: [ToolDefinition],
+        options: OpenAIChatRequestOptions?,
+        capabilities: OpenAIChatCapabilities
+    ) throws -> OpenAIChatToolChoice? {
+        let functions = Set(functionTools.map(\.name))
+        let customs = Set((options?.customTools ?? []).map(\.name))
+
+        guard let toolChoice = options?.toolChoice else {
+            return requestTools.isEmpty ? nil : .auto
+        }
+
+        switch toolChoice {
+        case .required:
+            guard !requestTools.isEmpty else {
+                throw AgentError.llmError(.other("OpenAI Chat toolChoice.required requires at least one tool"))
+            }
+        case let .function(name):
+            guard functions.contains(name) else {
+                throw AgentError.llmError(.other(
+                    "OpenAI Chat toolChoice.function requires tool '\(name)' in the request"
+                ))
+            }
+        case let .custom(name):
+            try validateRequestedCustomChoice(name, customs: customs, capabilities: capabilities)
+        case let .allowedTools(_, tools):
+            try validateAllowedTools(tools, functions: functions, customs: customs, capabilities: capabilities)
+        case .none, .auto:
+            break
+        }
+
+        return toolChoice
+    }
+
+    private func validateRequestedCustomChoice(
+        _ name: String,
+        customs: Set<String>,
+        capabilities: OpenAIChatCapabilities
+    ) throws {
+        guard capabilities.supportsCustomTools else {
+            throw AgentError.llmError(.featureUnsupported(
+                provider: "openai-chat-\(capabilities.profile)",
+                feature: "custom tool choice"
+            ))
+        }
+        guard customs.contains(name) else {
+            throw AgentError.llmError(.other(
+                "OpenAI Chat toolChoice.custom requires custom tool '\(name)' in the request"
+            ))
+        }
+    }
+
+    private func validateAllowedTools(
+        _ tools: [OpenAIChatAllowedTool],
+        functions: Set<String>,
+        customs: Set<String>,
+        capabilities: OpenAIChatCapabilities
+    ) throws {
+        guard capabilities.profile == .firstParty else {
+            throw AgentError.llmError(.featureUnsupported(
+                provider: "openai-chat-\(capabilities.profile)",
+                feature: "allowed tools"
+            ))
+        }
+        guard !tools.isEmpty else {
+            throw AgentError.llmError(.other("OpenAI Chat allowed tools must not be empty"))
+        }
+        for tool in tools {
+            switch tool {
+            case let .function(name):
+                guard functions.contains(name) else {
+                    throw AgentError.llmError(.other(
+                        "OpenAI Chat allowed function tool '\(name)' is missing from the request"
+                    ))
+                }
+            case let .custom(name):
+                guard customs.contains(name) else {
+                    throw AgentError.llmError(.other(
+                        "OpenAI Chat allowed custom tool '\(name)' is missing from the request"
+                    ))
+                }
+            }
+        }
+    }
+
+    func buildURLRequest(_ request: ChatCompletionRequest) throws -> URLRequest {
+        let url = baseURL.appendingPathComponent(chatCompletionPath)
+        var headers: [(String, String)] = []
+        if let apiKey {
+            headers.append(("Authorization", "Bearer \(apiKey)"))
+        }
+        headers.append(contentsOf: additionalHeaders().map { ($0.key, $0.value) })
+        return try buildJSONPostRequest(url: url, body: request, headers: headers)
+    }
+
+    func parseResponse(_ data: Data) throws -> AssistantMessage {
+        if let errorResponse = try? JSONDecoder().decode(OpenAIErrorResponse.self, from: data) {
+            throw AgentError.llmError(.providerError(
+                provider: providerIdentifier,
+                code: errorResponse.error.code,
+                message: errorResponse.error.resolvedMessage
+            ))
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        let response: ChatCompletionResponse
+        do {
+            response = try decoder.decode(ChatCompletionResponse.self, from: data)
+        } catch {
+            throw AgentError.llmError(.decodingFailed(error))
+        }
+
+        guard let choice = response.choices.first else {
+            throw AgentError.llmError(.noChoices)
+        }
+
+        let toolCalls = (choice.message.toolCalls ?? []).map { call in
+            ToolCall(id: call.id, name: call.name, arguments: call.arguments, kind: call.kind)
+        }
+
+        let reasoning = (choice.message.reasoning ?? choice.message.reasoningContent)
+            .flatMap { $0.isEmpty ? nil : ReasoningContent(content: $0) }
+
+        let reasoningDetails = try OpenAIChatReasoningDetails.decode(from: data)
+
+        return AssistantMessage(
+            content: choice.message.content ?? "",
+            toolCalls: toolCalls,
+            tokenUsage: response.usage?.tokenUsage,
+            reasoning: reasoning,
+            reasoningDetails: reasoningDetails
+        )
+    }
+}
+
+public extension OpenAIClient {
+    static let openAIBaseURL = URL(validStaticString: "https://api.openai.com/v1")
+    static let openRouterBaseURL = URL(validStaticString: "https://openrouter.ai/api/v1")
+    static let groqBaseURL = URL(validStaticString: "https://api.groq.com/openai/v1")
+    static let togetherBaseURL = URL(validStaticString: "https://api.together.ai/v1")
+    static let ollamaBaseURL = URL(validStaticString: "http://localhost:11434/v1")
+
+    private static let togetherReasoningKwargs: [String: JSONValue] = [
+        "chat_template_kwargs": .object([
+            "clear_thinking": .bool(false),
+            "thinking": .bool(true),
+        ]),
+    ]
+
+    /// A client for an arbitrary OpenAI-compatible Chat Completions endpoint.
+    static func proxy(
+        baseURL: URL,
+        maxTokens: Int = 16384,
+        contextWindowSize: Int? = nil,
+        chatCompletionPath: String = "chat/completions",
+        additionalHeaders: @Sendable @escaping () -> [String: String] = { [:] },
+        session: URLSession = .shared,
+        retryPolicy: RetryPolicy = .default,
+        reasoningConfig: ReasoningConfig? = nil,
+        assistantReplayProfile: OpenAIChatAssistantReplayProfile = .conservative
+    ) -> OpenAIClient {
+        OpenAIClient(
+            apiKey: nil,
+            model: nil,
+            maxTokens: maxTokens,
+            contextWindowSize: contextWindowSize,
+            baseURL: baseURL,
+            chatCompletionPath: chatCompletionPath,
+            additionalHeaders: additionalHeaders,
+            session: session,
+            retryPolicy: retryPolicy,
+            reasoningConfig: reasoningConfig,
+            profile: .compatible,
+            assistantReplayProfile: assistantReplayProfile
+        )
+    }
+
+    /// A client for OpenAI's first-party Chat Completions API.
+    static func openAI(
+        apiKey: String,
+        model: String? = nil,
+        maxTokens: Int = 16384,
+        contextWindowSize: Int? = nil,
+        reasoningConfig: ReasoningConfig? = nil
+    ) -> OpenAIClient {
+        OpenAIClient(
+            apiKey: apiKey,
+            model: model,
+            maxTokens: maxTokens,
+            contextWindowSize: contextWindowSize,
+            baseURL: openAIBaseURL,
+            reasoningConfig: reasoningConfig,
+            profile: .firstParty
+        )
+    }
+
+    /// A client for OpenRouter's Chat Completions API, replaying reasoning as `reasoning_details` on assistant turns.
+    static func openRouter(
+        apiKey: String,
+        model: String? = nil,
+        maxTokens: Int = 16384,
+        contextWindowSize: Int? = nil,
+        reasoningConfig: ReasoningConfig? = nil,
+        assistantReplayProfile: OpenAIChatAssistantReplayProfile = .openRouterReasoningDetails
+    ) -> OpenAIClient {
+        OpenAIClient(
+            apiKey: apiKey,
+            model: model,
+            maxTokens: maxTokens,
+            contextWindowSize: contextWindowSize,
+            baseURL: openRouterBaseURL,
+            reasoningConfig: reasoningConfig,
+            profile: .openRouter,
+            assistantReplayProfile: assistantReplayProfile
+        )
+    }
+
+    /// A client for Together's OpenAI-compatible API, replaying reasoning as `reasoning_content` on tool-call turns.
+    static func together(
+        apiKey: String,
+        model: String? = nil,
+        maxTokens: Int = 16384,
+        contextWindowSize: Int? = nil,
+        assistantReplayProfile: OpenAIChatAssistantReplayProfile = .reasoningContent
+    ) -> OpenAIClient {
+        OpenAIClient(
+            apiKey: apiKey,
+            model: model,
+            maxTokens: maxTokens,
+            contextWindowSize: contextWindowSize,
+            baseURL: togetherBaseURL,
+            profile: .compatible,
+            providerIdentifier: .together,
+            assistantReplayProfile: assistantReplayProfile,
+            extraFields: togetherReasoningKwargs
+        )
+    }
+}

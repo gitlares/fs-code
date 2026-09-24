@@ -1,0 +1,442 @@
+import Foundation
+
+extension ResponsesAPIClient {
+    private static let sseDecoder = JSONDecoder()
+
+    func performStreamRequest(
+        messages: [ChatMessage],
+        tools: [ToolDefinition],
+        extraFields: [String: JSONValue],
+        onResponse: (@Sendable (HTTPURLResponse) -> Void)?,
+        requestMode: RunRequestMode = .auto,
+        options: ResponsesRequestOptions?,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws {
+        try messages.validateForLLMRequest()
+        if shouldResetConversationBeforeRequest(messages: messages, requestMode: requestMode) {
+            resetConversation()
+        }
+        let request = try buildRequest(
+            messages: messages, tools: tools,
+            stream: true, extraFields: extraFields,
+            requestMode: requestMode, options: options
+        )
+        let urlRequest = try buildURLRequest(request)
+        let (bytes, httpResponse) = try await HTTPRetry.performStream(
+            urlRequest: urlRequest, session: session, retryPolicy: retryPolicy
+        )
+        onResponse?(httpResponse)
+        pendingInputMessages = messages
+        try await processRunStreamBytes(
+            bytes: bytes,
+            messagesCount: messages.count,
+            stallTimeout: retryPolicy.streamStallTimeout,
+            continuation: continuation
+        )
+    }
+
+    func processRunStreamBytes<S: AsyncSequence & Sendable>(
+        bytes: S,
+        messagesCount: Int,
+        stallTimeout: Duration?,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws where S.Element == UInt8 {
+        let semanticState = ResponsesStreamState()
+        try await processSSEStream(
+            bytes: bytes, provider: providerIdentifier, stallTimeout: stallTimeout
+        ) { [self] event, diagnostics in
+            try await handleSSEEvent(
+                event,
+                messagesCount: messagesCount,
+                semanticState: semanticState,
+                diagnostics: diagnostics,
+                continuation: continuation
+            )
+        }
+        continuation.finish()
+    }
+
+    private func handleSSEEvent(
+        _ event: SSEEvent,
+        messagesCount: Int,
+        semanticState: ResponsesStreamState,
+        diagnostics: StreamFailureDiagnostics,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws -> SSEDisposition {
+        try await handleSSEPayload(
+            event.data,
+            messagesCount: messagesCount,
+            semanticState: semanticState,
+            diagnostics: diagnostics,
+            continuation: continuation
+        )
+    }
+
+    private func handleSSEPayload(
+        _ payload: String,
+        messagesCount: Int,
+        semanticState: ResponsesStreamState,
+        diagnostics: StreamFailureDiagnostics,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws -> SSEDisposition {
+        let data = Data(payload.utf8)
+        let eventType = try Self.sseDecoder.decode(EventTypeOnly.self, from: data).type
+
+        return try await dispatchSSEEvent(
+            eventType,
+            data: data,
+            messagesCount: messagesCount,
+            semanticState: semanticState,
+            diagnostics: diagnostics,
+            continuation: continuation
+        )
+    }
+
+    private func dispatchSSEEvent(
+        _ type: String,
+        data: Data,
+        messagesCount: Int,
+        semanticState: ResponsesStreamState,
+        diagnostics: StreamFailureDiagnostics,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws -> SSEDisposition {
+        switch type {
+        case "response.output_text.delta":
+            try await handleTextDelta(
+                data: data,
+                semanticState: semanticState,
+                continuation: continuation
+            )
+        case "response.output_item.added":
+            try await handleOutputItemAdded(
+                data: data,
+                semanticState: semanticState,
+                diagnostics: diagnostics,
+                continuation: continuation
+            )
+        case "response.function_call_arguments.delta",
+             "response.custom_tool_call_input.delta":
+            try await handleToolCallArgsDelta(
+                data: data,
+                semanticState: semanticState,
+                continuation: continuation
+            )
+        case "response.reasoning_summary_text.delta":
+            try await handleReasoningSummaryDelta(
+                data: data,
+                semanticState: semanticState,
+                continuation: continuation
+            )
+        case "response.output_item.done":
+            try await handleOutputItemDone(
+                data: data,
+                semanticState: semanticState,
+                diagnostics: diagnostics
+            )
+        case "response.completed":
+            try await handleCompleted(
+                data: data,
+                messagesCount: messagesCount,
+                semanticState: semanticState,
+                diagnostics: diagnostics,
+                continuation: continuation
+            )
+            return .complete
+        case "response.incomplete":
+            throw AgentError.llmError(.streamFailed(.providerError(
+                code: nil,
+                message: "Response stream ended incomplete",
+                diagnostics: diagnostics
+            )))
+        case "response.failed":
+            try handleFailed(data: data, diagnostics: diagnostics)
+        case "error", "response.error":
+            try handleErrorEvent(data: data, diagnostics: diagnostics)
+        default:
+            break
+        }
+        return .continue
+    }
+
+    private func handleTextDelta(
+        data: Data,
+        semanticState: ResponsesStreamState,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws {
+        let event = try Self.sseDecoder.decode(
+            TextDeltaEvent.self, from: data
+        )
+        if !event.delta.isEmpty {
+            let delta = StreamDelta.content(event.delta)
+            await semanticState.record(delta)
+            continuation.yield(.delta(delta))
+        }
+    }
+
+    private func handleOutputItemAdded(
+        data: Data,
+        semanticState: ResponsesStreamState,
+        diagnostics: StreamFailureDiagnostics,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws {
+        let event = try Self.sseDecoder.decode(
+            OutputItemAddedEvent.self, from: data
+        )
+        let kind: ToolCallKind
+        switch event.item.type {
+        case "function_call":
+            kind = .function
+        case "custom_tool_call":
+            kind = .custom
+        case "mcp_call", "computer_call", "apply_patch_call":
+            throw AgentError.llmError(.featureUnsupported(
+                provider: "responses",
+                feature: "\(event.item.type) streaming"
+            ))
+        default:
+            return
+        }
+        guard let callId = event.item.callId else {
+            throw AgentError.llmError(.streamFailed(.malformedStream(
+                reason: .missingToolCallId(index: event.outputIndex),
+                diagnostics: diagnostics
+            )))
+        }
+        guard let name = event.item.name else {
+            throw AgentError.llmError(.streamFailed(.malformedStream(
+                reason: .missingToolCallName(index: event.outputIndex),
+                diagnostics: diagnostics
+            )))
+        }
+        let delta = StreamDelta.toolCallStart(
+            index: event.outputIndex,
+            id: callId,
+            name: name,
+            kind: kind
+        )
+        await semanticState.record(delta)
+        continuation.yield(.delta(delta))
+    }
+
+    private func handleToolCallArgsDelta(
+        data: Data,
+        semanticState: ResponsesStreamState,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws {
+        let event = try Self.sseDecoder.decode(
+            ToolCallArgsDeltaEvent.self, from: data
+        )
+        if !event.delta.isEmpty {
+            let delta = StreamDelta.toolCallDelta(
+                index: event.outputIndex,
+                arguments: event.delta
+            )
+            await semanticState.record(delta)
+            continuation.yield(.delta(delta))
+        }
+    }
+
+    private func handleReasoningSummaryDelta(
+        data: Data,
+        semanticState: ResponsesStreamState,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws {
+        let event = try Self.sseDecoder.decode(
+            ReasoningSummaryDeltaEvent.self, from: data
+        )
+        if !event.delta.isEmpty {
+            if let separator = await semanticState.summaryPartSeparator(
+                forOutput: event.outputIndex, summary: event.summaryIndex
+            ) {
+                let sepDelta = StreamDelta.reasoning(separator)
+                await semanticState.record(sepDelta)
+                continuation.yield(.delta(sepDelta))
+            }
+            let delta = StreamDelta.reasoning(event.delta)
+            await semanticState.record(delta)
+            continuation.yield(.delta(delta))
+        }
+    }
+
+    private func handleOutputItemDone(
+        data: Data,
+        semanticState: ResponsesStreamState,
+        diagnostics: StreamFailureDiagnostics
+    ) async throws {
+        let value = try Self.sseDecoder.decode(
+            OutputItemDoneEvent.self, from: data
+        )
+        let isCompletionValid: Bool
+        if value.item.type == "reasoning" {
+            isCompletionValid = value.item.status == nil || value.item.status == "completed"
+        } else {
+            isCompletionValid = value.item.status == "completed"
+        }
+        guard isCompletionValid else {
+            throw AgentError.llmError(.streamFailed(.malformedStream(
+                reason: .finalizedFieldDiverged(field: "output-completion-status"),
+                diagnostics: diagnostics
+            )))
+        }
+        let item = try ResponsesOutputItem(value.item.raw)
+        try await semanticState.recordCompletedOutputItem(
+            item,
+            at: value.outputIndex,
+            diagnostics: diagnostics
+        )
+    }
+
+    private func handleCompleted(
+        data: Data,
+        messagesCount: Int,
+        semanticState: ResponsesStreamState,
+        diagnostics: StreamFailureDiagnostics,
+        continuation: AsyncThrowingStream<RunStreamElement, Error>.Continuation
+    ) async throws {
+        let event: CompletedEvent
+        do {
+            event = try Self.sseDecoder.decode(
+                CompletedEvent.self, from: data
+            )
+        } catch {
+            throw AgentError.llmError(.decodingFailed(error))
+        }
+        let resp = event.response
+        try checkResponseError(resp)
+        guard resp.status != "incomplete" else {
+            throw AgentError.llmError(.streamFailed(.providerError(
+                code: nil,
+                message: "Response stream ended incomplete",
+                diagnostics: diagnostics
+            )))
+        }
+        let completedOutput = try await semanticState.completedOutput(
+            whenTerminalOutputIsEmpty: resp.output.isEmpty,
+            diagnostics: diagnostics
+        )
+        let terminalResponse = if let completedOutput {
+            ResponsesAPIResponse(
+                id: resp.id,
+                status: resp.status,
+                output: completedOutput,
+                usage: resp.usage,
+                error: resp.error
+            )
+        } else {
+            resp
+        }
+        let projection = projectResponse(terminalResponse)
+        let reconciliationDeltas = try await semanticState.reconciliationDeltas(
+            response: resp,
+            projection: projection,
+            completedOutput: completedOutput,
+            diagnostics: diagnostics
+        )
+        for delta in reconciliationDeltas {
+            continuation.yield(.delta(delta))
+        }
+        lastResponseId = resp.id
+        lastMessageCount = messagesCount + 1
+        if let inputMessages = pendingInputMessages {
+            lastPrefixSignature = prefixSignature(inputMessages + [.assistant(projection.assistantMessage)])
+            pendingInputMessages = nil
+        }
+        if let continuity = projection.continuity {
+            continuation.yield(.finalizedContinuity(continuity))
+        }
+        continuation.yield(.delta(.finished(usage: projection.tokenUsage)))
+    }
+
+    private func handleFailed(data: Data, diagnostics: StreamFailureDiagnostics) throws {
+        let event = try Self.sseDecoder.decode(FailedEvent.self, from: data)
+        guard let error = event.response.error else {
+            throw AgentError.llmError(.streamFailed(.providerError(
+                code: nil,
+                message: "Response failed without an error payload",
+                diagnostics: diagnostics
+            )))
+        }
+        throw AgentError.llmError(.streamFailed(.providerError(
+            code: error.code,
+            message: error.message,
+            diagnostics: diagnostics
+        )))
+    }
+
+    private func handleErrorEvent(data: Data, diagnostics: StreamFailureDiagnostics) throws {
+        let event: ErrorEvent
+        do {
+            event = try Self.sseDecoder.decode(ErrorEvent.self, from: data)
+        } catch {
+            throw AgentError.llmError(.decodingFailed(error))
+        }
+        throw AgentError.llmError(.streamFailed(.providerError(
+            code: event.code ?? event.error?.code,
+            message: event.message ?? event.error?.message ?? "Provider returned an error without a message",
+            diagnostics: diagnostics
+        )))
+    }
+}
+
+private struct EventTypeOnly: Decodable { let type: String }
+private struct TextDeltaEvent: Decodable { let delta: String }
+private struct OutputItemAddedEvent: Decodable {
+    let outputIndex: Int
+    let item: OutputItemStub
+    enum CodingKeys: String, CodingKey { case outputIndex = "output_index", item }
+}
+
+private struct OutputItemStub: Decodable {
+    let type: String
+    let callId: String?
+    let name: String?
+    enum CodingKeys: String, CodingKey { case type, callId = "call_id", name }
+}
+
+private struct ToolCallArgsDeltaEvent: Decodable {
+    let outputIndex: Int
+    let delta: String
+    enum CodingKeys: String, CodingKey { case outputIndex = "output_index", delta }
+}
+
+private struct ReasoningSummaryDeltaEvent: Decodable {
+    let delta: String
+    let outputIndex: Int?
+    let summaryIndex: Int?
+    enum CodingKeys: String, CodingKey { case delta, outputIndex = "output_index", summaryIndex = "summary_index" }
+}
+
+private struct OutputItemDoneEvent: Decodable {
+    let outputIndex: Int
+    let item: OutputItemDoneItem
+
+    enum CodingKeys: String, CodingKey {
+        case outputIndex = "output_index", item
+    }
+}
+private struct OutputItemDoneItem: Decodable {
+    let type: String
+    let status: String?
+    let raw: JSONValue
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: TypeKey.self)
+        type = try container.decode(String.self, forKey: .type)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        raw = try JSONValue(from: decoder)
+    }
+
+    private enum TypeKey: String, CodingKey {
+        case type, status
+    }
+}
+
+private struct CompletedEvent: Decodable { let response: ResponsesAPIResponse }
+private struct FailedEvent: Decodable { let response: FailedResponseBody }
+private struct FailedResponseBody: Decodable { let error: ResponsesErrorDetail? }
+
+private struct ErrorEvent: Decodable {
+    let code: String?
+    let message: String?
+    let error: ResponsesErrorDetail?
+}

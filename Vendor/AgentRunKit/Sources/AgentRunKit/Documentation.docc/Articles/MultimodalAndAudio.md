@@ -1,0 +1,406 @@
+# Multimodal and Audio
+
+Send images, video, PDFs, and audio as input. Stream audio output from the model. Generate speech with ``TTSClient``.
+
+## Multimodal Input
+
+``ContentPart`` represents a single piece of content within a user message. Six variants cover text and media:
+
+| Variant | Factory Method |
+|---|---|
+| `.text(String)` | Direct case |
+| `.imageURL(String)` | ``ContentPart/image(url:)`` |
+| `.imageBase64(data:mimeType:)` | ``ContentPart/image(data:mimeType:)`` |
+| `.videoBase64(data:mimeType:)` | ``ContentPart/video(data:mimeType:)`` |
+| `.pdfBase64(data:)` | ``ContentPart/pdf(data:)`` |
+| `.audioBase64(data:format:)` | ``ContentPart/audio(data:format:)`` |
+
+Build multimodal messages with ``ChatMessage`` convenience methods:
+
+```swift
+// Image from URL
+let msg = ChatMessage.user(text: "Describe this image.", imageURL: "https://example.com/photo.jpg")
+
+// Image from raw bytes
+let msg = ChatMessage.user(text: "What's in this photo?", imageData: jpegData, mimeType: "image/jpeg")
+
+// Video
+let msg = ChatMessage.user(text: "Summarize this clip.", videoData: mp4Data, mimeType: "video/mp4")
+
+// Audio with text prompt
+let msg = ChatMessage.user(text: "Transcribe this.", audioData: wavData, format: .wav)
+
+// Audio only
+let msg = ChatMessage.user(audioData: wavData, format: .wav)
+```
+
+For full control, pass an array of ``ContentPart`` values directly:
+
+```swift
+let msg = ChatMessage.user([
+    .text("Compare these two images."),
+    .image(url: "https://example.com/a.jpg"),
+    .image(data: localPNG, mimeType: "image/png"),
+])
+```
+
+``AudioInputFormat`` supports: `wav`, `mp3`, `m4a`, `flac`, `ogg`, `opus`, `webm`. Each case provides a `mimeType` property for wire format encoding.
+
+## Per-Provider Encoding
+
+Each client encodes ``ContentPart`` onto its native wire format. Encoding and accepted media types vary:
+
+| Provider | Images | Audio | Video | PDF | Wire format |
+|---|---|---|---|---|---|
+| ``OpenAIClient`` | URL, base64 | Yes | No | No | `content: [{type: "image_url" \| ...}]` |
+| ``ResponsesAPIClient`` | URL, base64 | No | No | No | `content: [{type: "input_image" \| ...}]` |
+| ``AnthropicClient`` | base64 | No | No | base64 | `content: [{type: "image" \| "document", source: {type: "base64", media_type, data}}]` |
+| ``VertexAnthropicClient`` | base64 | No | No | base64 | same as ``AnthropicClient`` |
+| ``GeminiClient`` | base64 | base64 | base64 | base64 | `parts: [{inlineData: {mimeType, data}}]` |
+| ``VertexGoogleClient`` | base64 | base64 | base64 | base64 | same as ``GeminiClient`` |
+
+Anthropic and Gemini reject raw image URLs because neither provider fetches external URLs server-side. Passing an `.imageURL` part to either client throws ``TransportError/featureUnsupported(provider:feature:)`` at request build. Fetch the bytes yourself and pass them as `.imageBase64`.
+
+## Audio Streaming Output
+
+Some providers (OpenAI) can stream audio alongside text. Three ``StreamEvent`` cases carry audio data:
+
+| Event | Description |
+|---|---|
+| `.audioData(Data)` | A chunk of audio bytes, delivered incrementally |
+| `.audioTranscript(String)` | Text transcript of the generated audio |
+| `.audioFinished(id:expiresAt:data:)` | Final audio payload with metadata |
+
+Enable audio output by passing `modalities` and `audio` configuration through ``RequestContext`` extra fields:
+
+```swift
+let requestContext = RequestContext(extraFields: [
+    "modalities": .array([.string("text"), .string("audio")]),
+    "audio": .object([
+        "voice": .string("alloy"),
+        "format": .string("pcm16"),
+    ]),
+])
+
+for try await event in agent.stream(userMessage: "Tell me a story.", context: ctx, requestContext: requestContext) {
+    switch event.kind {
+    case .audioData(let chunk):
+        audioPlayer.enqueue(chunk)
+    case .audioTranscript(let text):
+        print(text)
+    case .audioFinished(_, _, let fullAudio):
+        audioPlayer.finalize(fullAudio)
+    default:
+        break
+    }
+}
+```
+
+## Text-to-Speech
+
+``TTSClient`` generates speech from text using any ``TTSProvider``. It handles chunking, concurrent generation, and ordered reassembly.
+
+### Setup
+
+```swift
+let provider = OpenAITTSProvider(apiKey: "sk-...", model: "gpt-4o-mini-tts")
+let tts = TTSClient(provider: provider, maxConcurrent: 4)
+```
+
+``OpenAITTSProvider`` accepts `baseURL`, `maxChunkCharacters`, `defaultVoice`, and `defaultFormat` in its initializer. AgentRunKit currently defaults the `model` parameter to `tts-1`, but OpenAI's current recommended speech-generation model is `gpt-4o-mini-tts`. The other defaults are voice `alloy`, format `.mp3`, and chunk size `4096`.
+
+### Generating Audio
+
+These methods cover different use cases:
+
+| Method | Returns | Behavior |
+|---|---|---|
+| `generate(text:voice:options:)` | `Data` | Single request, no chunking |
+| `stream(text:voice:options:)` | `AsyncThrowingStream<TTSSegment, Error>` | Chunked, yields ordered ``TTSSegment`` values as they complete |
+| `generateAll(text:voice:options:)` | `Data` | Chunked, concatenates all segments into one `Data` |
+| `generateWithManifest(text:voice:options:stitch:)` | ``TTSConcatenationResult`` | Like `generateAll` but also returns a per-segment manifest; an optional ``TTSStitchPolicy`` stitches PCM with boundary-keyed pauses |
+| `generateBatch(text:voice:options:stitch:)` | ``TTSBatchResult`` | Chunked, preserves completed segments and reports per-chunk failures instead of throwing |
+| `chunks(for:)` | `[TTSChunk]` | The chunk plan this client will use, without invoking the provider |
+
+```swift
+// Single generation
+let audio = try await tts.generate(text: "Hello, world.", voice: "nova")
+
+// Streaming segments
+for try await segment in tts.stream(text: longArticle) {
+    player.play(segment.audio)
+    let chunk = segment.chunk
+    print("chunk \(chunk.index + 1)/\(chunk.total) bytes \(chunk.sourceRange): \(chunk.text)")
+}
+
+// Full concatenated output
+let fullAudio = try await tts.generateAll(text: longArticle, options: TTSOptions(speed: 1.25))
+
+// Concatenated audio plus a per-segment manifest
+let result = try await tts.generateWithManifest(text: longArticle, options: TTSOptions(responseFormat: .pcm))
+for entry in result.manifest {
+    if let range = entry.timing.byteRangeInConcatenatedAudio {
+        print("chunk \(entry.chunk.index): bytes \(range) of result.audio")
+    }
+    if let duration = entry.timing.durationSeconds {
+        print("chunk \(entry.chunk.index): \(duration) seconds")
+    }
+}
+
+// Forecast the chunk plan without generating audio
+let plan = tts.chunks(for: longArticle)
+```
+
+`generateAll` is implemented on top of the same path and returns `result.audio`.
+
+`stream` segments always carry ``TTSSegmentTiming/uncomputed`` timing. Per-segment audio is the
+raw chunk bytes, and final container offsets are only meaningful after concatenation.
+
+#### Supported Timing
+
+| Format | Byte range | Duration |
+|---|---:|---:|
+| `pcm`  | yes | yes, when the provider supplies sample rate, channels, and bits per sample |
+| `mp3`  | yes (accounts for ID3v2, Xing/Info, and ID3v1 stripping) | not supported |
+| `wav`, `flac`, `opus`, `aac` | not supported | not supported |
+
+Unsupported values are reported as `nil` rather than guessed. Duration for `pcm` is computed as
+`bytes / (sampleRate * channels * (bitsPerSample / 8))` when the provider's
+``TTSProvider/resolvedEncoding(for:options:)`` returns a fully populated ``TTSAudioEncoding``.
+Built-in providers override the hook only with values they have published documentation for.
+``OpenAITTSProvider`` populates `pcm` `sampleRate` (24000), `channels` (1, mono), and `bitsPerSample`
+(16) from OpenAI's `/v1/audio/speech` documentation, so OpenAI `pcm` segments carry a computed
+`durationSeconds`. Custom providers using the protocol's default implementation report `nil` PCM
+fields and therefore `nil` duration.
+
+### TTSOptions
+
+``TTSOptions`` controls per-request parameters:
+
+- `speed`: Playback speed multiplier. OpenAI accepts 0.25 to 4.0.
+- `responseFormat`: Override the provider's default format. See ``TTSAudioFormat`` (`mp3`, `opus`, `aac`, `flac`, `wav`, `pcm`).
+
+### How Chunking Works
+
+The chunker splits input text on sentence boundaries using `NLTokenizer`. Sentences are packed up to
+the provider's `maxChunkCharacters` limit. Oversized sentences fall back to word-level, then
+character-level splitting. Every ``TTSChunk`` records the ``TTSBoundary`` immediately following it
+(sentence, paragraph, within-sentence, or end), classified from the original text so callers and the
+stitcher can tell where one sentence or paragraph ends and the next begins. Blank-line whitespace is
+folded into the adjacent chunk, so a chunk is never pure whitespace.
+
+``TTSClient`` dispatches up to `maxConcurrent` chunk requests in parallel. Results are buffered and
+yielded in original order.
+
+Each ``TTSSegment`` carries a ``TTSChunk``, a ``TTSAudioEncoding``, a ``TTSSegmentTiming``, and the
+audio bytes. The chunk, encoding, and timing fields are the canonical access path; flat properties
+on ``TTSSegment`` forward to the chunk for compact logging.
+
+For force-split chunks, `text` normalizes whitespace to single spaces while `sourceRange` covers the
+span of the words it contains. That keeps ranges monotonic for caller-side highlighting and forced
+alignment.
+
+``TTSClient/chunks(for:)`` returns the same ``TTSChunk`` values the stream will emit, without calling
+the provider. Use it to forecast chunk identity before generation or to drive offline planning.
+
+``TTSConcatenationResult`` and ``TTSManifestEntry`` pair concatenated audio bytes with a per-segment
+manifest of chunk, encoding, and timing.
+
+For MP3 output, the concatenator strips ID3v2 headers, Xing/Info frames, and ID3v1 tails from interior segments for clean concatenation.
+
+### Stitching PCM
+
+Long narration assembled from short chunks has audible seams: independent draws joined with no gap,
+and no end-of-sentence or end-of-paragraph pause, because each chunk was synthesized without the
+surrounding structure. Pass a ``TTSStitchPolicy`` to
+``TTSClient/generateWithManifest(text:voice:options:stitch:)`` to assemble 16-bit PCM into one stream
+with boundary-keyed pauses and edge fades.
+
+```swift
+let policy = TTSStitchPolicy(
+    targetCharacters: 240,
+    preferParagraphBoundaries: true,
+    sentencePause: .milliseconds(220),
+    paragraphPause: .milliseconds(600),
+    joinFade: .milliseconds(6)
+)
+let result = try await tts.generateWithManifest(
+    text: script,
+    options: TTSOptions(responseFormat: .pcm),
+    stitch: policy
+)
+```
+
+The policy couples two decisions. `targetCharacters` and `preferParagraphBoundaries` steer the chunker
+to fill toward a soft size target and cut on a sentence or, when one is near, a paragraph boundary, so
+each cut lands where the model already placed its own pause. `sentencePause`, `paragraphPause`, and
+`joinFade` then insert silence of the boundary-appropriate length and fade each segment edge into it.
+Within-sentence seams, from an oversized sentence, are joined directly with no pause.
+
+The manifest stays truthful: each ``TTSSegmentTiming/byteRangeInConcatenatedAudio`` still covers that
+segment's audio, inserted pauses are the gaps between consecutive ranges, and `durationSeconds`
+reflects the stitched output. Stitching is deterministic for a given chunk plan and policy. It
+requires 16-bit PCM with a known sample rate and channel count; any other output throws
+``TTSError/invalidConfiguration(_:)``. Without a policy,
+``TTSClient/generateWithManifest(text:voice:options:stitch:)`` concatenates the segments raw, exactly
+as ``TTSClient/generateAll(text:voice:options:)`` does.
+
+### Matching Loudness
+
+Each chunk is an independent draw, so loudness can wander from one to the next. Set
+``TTSStitchPolicy/loudness`` to level the chunks to a consistent loudness without flattening the
+performance.
+
+```swift
+let policy = TTSStitchPolicy(
+    sentencePause: .milliseconds(220),
+    loudness: TTSLoudnessMatch(maxCorrectionDB: 3)
+)
+let result = try await tts.generateWithManifest(
+    text: script,
+    options: TTSOptions(responseFormat: .pcm),
+    stitch: policy
+)
+if let achievedLUFS = result.loudness?.achievedLUFS {
+    print("program loudness: \(achievedLUFS) LUFS")
+}
+```
+
+The pass measures each chunk's gated integrated loudness (ITU-R BS.1770), anchors to the program
+median, and applies one scalar gain per chunk bounded by `maxCorrectionDB`. A single per-chunk gain
+corrects the per-draw offset while leaving the chunk's own dynamics intact, and the clamp keeps every
+correction small enough that a genuinely soft chunk is never forced up to match a loud one. A
+true-peak guard then attenuates the whole program if its oversampled true peak would exceed
+`truePeakCeilingDBTP`. All correction happens in floating point and is quantized to 16-bit once, so no
+intermediate stage clips.
+
+``TTSLoudnessMatch/target`` selects the anchor. `.programMedian` levels the chunks to each other and
+imposes no absolute level. `.lufs(_:)` additionally shifts the whole program to an absolute loudness,
+for example -16 LUFS for podcast delivery. Because the program is mono, that figure is the one-channel
+file's loudness; a player that renders it as dual-mono stereo reads it about 3 dB louder. When the
+true-peak ceiling forces the program below an absolute target the shortfall is reported, never hidden:
+``TTSLoudnessSummary/achievedLUFS`` is where the program actually landed and
+``TTSLoudnessSummary/appliedTrimDB`` is how far the guard pulled it down.
+
+Loudness matching populates the manifest with its own measurements. Each ``TTSManifestEntry/loudness``
+carries the segment's measured loudness and the gain applied, and ``TTSConcatenationResult/loudness``
+carries the program-level outcome, so the correction is auditable from the result alone. The pass
+requires mono 16-bit PCM and runs only through
+``TTSClient/generateWithManifest(text:voice:options:stitch:)``; streaming cannot match loudness because
+it has no lookahead over chunks not yet synthesized. The default ceiling is the EBU R128 production
+value of -1 dBTP.
+
+### Recovering from Partial Failure
+
+``TTSClient/stream(text:voice:options:)``, ``TTSClient/generateAll(text:voice:options:)``, and
+``TTSClient/generateWithManifest(text:voice:options:stitch:)`` are all-or-nothing: one chunk's failure
+throws and discards the segments that already succeeded. For long inputs, where re-running the whole
+batch re-bills the good chunks, use ``TTSClient/generateBatch(text:voice:options:stitch:)``. It returns
+a ``TTSBatchResult`` that preserves every completed ``TTSSegment`` and reports each failed chunk as a
+``TTSChunkFailure`` keyed by chunk index rather than completion order; only empty text and invalid
+configuration throw.
+
+Recover by re-running just the failed chunks, merging, then assembling:
+
+```swift
+let batch = try await tts.generateBatch(text: longArticle, stitch: policy)
+let whole: TTSBatchResult
+if batch.isComplete {
+    whole = batch
+} else {
+    let retry = try await tts.generate(chunks: batch.failedChunks)
+    whole = try batch.merging(retry)
+}
+let result = try tts.stitch(segments: whole.completedSegments, policy: policy)
+```
+
+``TTSClient/generate(chunks:voice:options:)`` re-runs exactly the chunks you pass and reports their
+outcomes, so the caller owns the retry policy. ``TTSBatchResult/merging(_:)`` folds a retry into the
+prior result and refuses to overwrite a completed chunk. ``TTSClient/concatenate(segments:)`` and
+``TTSClient/stitch(segments:policy:)`` reassemble a complete, gap-free segment set; a hole or mixed
+encodings throws ``TTSError/invalidConfiguration(_:)``. Loudness is re-derived over the segments you
+pass, so stitching the complete recovered set reproduces the program a single uninterrupted run makes.
+
+### Custom Providers
+
+Conform to ``TTSProvider`` to use any speech synthesis backend. ``TTSClient`` delivers a
+``TTSChunkContext`` carrying the chunk plan and requested encoding alongside each call. Providers
+should treat `context.encoding` as the authoritative source for the format to produce, and can
+additionally use it for logging or request correlation.
+
+Override ``TTSProvider/resolvedEncoding(for:options:)`` to surface documented `pcm` sample rate,
+channel count, and bit depth so the framework can compute ``TTSSegmentTiming/durationSeconds`` for
+`pcm` segments. The default implementation returns ``TTSAudioEncoding`` with `nil` PCM fields, so
+providers without published encoding values can omit it.
+
+```swift
+struct MyTTSProvider: TTSProvider {
+    let config: TTSProviderConfig
+
+    func resolvedEncoding(for format: TTSAudioFormat, options: TTSOptions) -> TTSAudioEncoding {
+        switch format {
+        case .pcm:
+            TTSAudioEncoding(format, sampleRate: 24000, channels: 1, bitsPerSample: 16)
+        case .mp3, .opus, .aac, .flac, .wav:
+            TTSAudioEncoding(format)
+        }
+    }
+
+    func generate(
+        text: String,
+        voice: String,
+        options: TTSOptions,
+        context: TTSChunkContext
+    ) async throws -> Data {
+        let chunkID = "\(context.chunk.index + 1)/\(context.chunk.total)"
+        log("synthesizing \(chunkID) as \(context.encoding.mimeType)")
+        // Call your speech API and return audio bytes
+    }
+}
+
+let provider = MyTTSProvider(config: TTSProviderConfig(
+    maxChunkCharacters: 2000,
+    defaultVoice: "default",
+    defaultFormat: .wav
+))
+let tts = TTSClient(provider: provider)
+```
+
+For HTTP-backed providers, ``HTTPDataRetry`` exposes the same retry primitive
+``OpenAITTSProvider`` uses: exponential backoff with jitter and `Retry-After`-aware handling of
+429 responses. Pass a ``RetryPolicy`` and receive `(Data, HTTPURLResponse)` on success or a
+``TransportError`` on failure; cancellation propagates through `CancellationError`.
+
+```swift
+let (data, response) = try await HTTPDataRetry.perform(
+    urlRequest: request,
+    session: .shared,
+    retryPolicy: .default
+)
+```
+
+## See Also
+
+- <doc:AgentAndChat>
+- <doc:LLMProviders>
+- ``ContentPart``
+- ``ChatMessage``
+- ``AudioInputFormat``
+- ``StreamEvent``
+- ``TTSClient``
+- ``TTSProvider``
+- ``OpenAITTSProvider``
+- ``TTSSegment``
+- ``TTSSegmentTiming``
+- ``TTSChunk``
+- ``TTSBoundary``
+- ``TTSChunkContext``
+- ``TTSAudioEncoding``
+- ``TTSManifestEntry``
+- ``TTSConcatenationResult``
+- ``TTSStitchPolicy``
+- ``TTSLoudnessMatch``
+- ``TTSLoudnessMeasurement``
+- ``TTSLoudnessSummary``
+- ``TTSOptions``
+- ``HTTPDataRetry``
