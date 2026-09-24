@@ -22,7 +22,7 @@ export FS_CODE_NOTARY_PROFILE="your-notary-profile"
 bash scripts/release-sign.sh
 ```
 
-`FS_CODE_SIGN_IDENTITY` may also be an unambiguous certificate hash. Set `FS_CODE_SIGN_KEYCHAIN` only when identity lookup must be restricted to a specific keychain; the script does not choose one by default. The script signs nested Sparkle components, the SwiftTerm resource bundle, the framework, and the application with hardened runtime and a secure timestamp. It then creates an architecture-specific ZIP, submits it to Apple, staples the ticket, and recreates the ZIP. If `FS_CODE_NOTARY_PROFILE` is omitted, the artifact is signed but **not notarized**.
+`FS_CODE_SIGN_IDENTITY` may also be an unambiguous certificate hash. Set `FS_CODE_SIGN_KEYCHAIN` only when identity lookup must be restricted to a specific keychain; the script does not choose one by default. The script signs nested Sparkle components, the framework, and the application with hardened runtime and a secure timestamp. The application signature seals the SwiftTerm resource bundle. It then creates an architecture-specific ZIP, submits it to Apple, staples the ticket, and recreates the ZIP. If `FS_CODE_NOTARY_PROFILE` is omitted, the artifact is signed but **not notarized**.
 
 Verify before publishing:
 
