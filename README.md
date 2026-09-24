@@ -99,4 +99,17 @@ Small, focused contributions are welcome. See [Contributing](CONTRIBUTING.md). P
 
 FS Code's original code is licensed under [MIT](LICENSE.txt). Third-party components keep their own licenses and attribution requirements; MIT is not a replacement for those licenses.
 
-Thanks to [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), [Sparkle](https://github.com/sparkle-project/Sparkle), AgentRunKit, and [Dracula](https://github.com/dracula/dracula-theme). Full notices ship in [ThirdPartyNotices.txt](Resources/ThirdPartyNotices.txt), with AgentRunKit provenance in [UPSTREAM.md](Vendor/AgentRunKit/UPSTREAM.md).
+FS Code builds on the work of these open-source projects:
+
+| Project | Contribution to FS Code |
+| --- | --- |
+| [AgentRunKit](https://github.com/Tom-Ryder/AgentRunKit) | Native Swift agent runtime behind our `AgentEngine` interface. |
+| [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | Terminal emulation for the integrated local terminal. |
+| [Sparkle](https://github.com/sparkle-project/Sparkle) | macOS update framework; the public update feed is not enabled in this alpha. |
+| [Dracula / Alucard](https://github.com/dracula/dracula-theme) | Dark and light color palettes. |
+
+We appreciate their maintainers and contributors. As the editor matures, we hope to contribute generally useful fixes and improvements upstream while keeping FS Code-specific behavior in the editor.
+
+Full notices ship in [ThirdPartyNotices.txt](Resources/ThirdPartyNotices.txt). Our vendored AgentRunKit version and local changes are documented in [UPSTREAM.md](Vendor/AgentRunKit/UPSTREAM.md).
+
+[RTK — Rust Token Killer](https://github.com/rtk-ai/rtk) is also part of our planned workflow. It is not yet integrated into the released application.
