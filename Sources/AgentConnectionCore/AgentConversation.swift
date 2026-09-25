@@ -2409,7 +2409,7 @@ public final class AgentConversationManager {
             activeTurn = nil
             cancelPendingFileChangesSoon(reinstallHandler: true)
             activity = .failed(message: message)
-            pauseQueue(message: "Queue paused because the current response failed.")
+            pauseQueue(message: Self.queueFailureMessage(for: message))
             persistAfterEvent()
             notifyObservers()
         case .completed(let turnID, let status, let error, let finalMessage):
@@ -2638,6 +2638,13 @@ public final class AgentConversationManager {
 
     private func pauseQueue(after error: Error) {
         pauseQueue(message: Self.safe(error))
+    }
+
+    private static func queueFailureMessage(for responseMessage: String) -> String {
+        if responseMessage == "The provider rate limit was reached. Wait a moment or switch to another connection." {
+            return "Queue paused because the provider rate limit was reached. Wait a moment or switch to another connection."
+        }
+        return "Queue paused because the current response failed."
     }
 
     private func pauseQueue(message: String) {

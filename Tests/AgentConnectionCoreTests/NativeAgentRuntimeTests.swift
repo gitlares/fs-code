@@ -5,6 +5,24 @@ import XCTest
 
 @MainActor
 final class NativeAgentRuntimeTests: XCTestCase {
+    func testRateLimitedFailureUsesActionableMessage() async throws {
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: UUID(), projectRoot: URL(fileURLWithPath: "/tmp"), profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil),
+            makeClient: { _ in ThrowingClient(error: TransportError.rateLimited(retryAfter: nil)) }
+        )
+        var errors: [String] = []
+        runtime.onNotification = { method, params in
+            if method == "error", let error = params["error"] as? [String: Any], let message = error["message"] as? String {
+                errors.append(message)
+            }
+        }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "Hello"]]])
+        await waitUntil { !errors.isEmpty }
+        XCTAssertEqual(errors, ["The provider rate limit was reached. Wait a moment or switch to another connection."])
+    }
+
     func testDirectTransportStreamFailureUsesSafeHTTPCategory() async throws {
         let runtime = NativeAgentRuntime(
             configuration: .init(projectID: UUID(), projectRoot: URL(fileURLWithPath: "/tmp"), profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil),

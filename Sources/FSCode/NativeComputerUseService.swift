@@ -2,6 +2,37 @@ import AppKit
 import ApplicationServices
 import AgentConnectionCore
 
+/// Process-wide prompt state: project windows share one macOS permission request.
+@MainActor
+final class AccessibilityPermissionGate {
+    static let shared = AccessibilityPermissionGate()
+    private let isTrusted: () -> Bool
+    private let requestPermission: () -> Void
+    private var requested = false
+
+    init(
+        isTrusted: @escaping () -> Bool = { AXIsProcessTrusted() },
+        requestPermission: @escaping () -> Void = {
+            _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        }
+    ) {
+        self.isTrusted = isTrusted
+        self.requestPermission = requestPermission
+    }
+
+    func authorize() -> Bool {
+        guard isTrusted() else {
+            if !requested {
+                requested = true
+                requestPermission()
+            }
+            // Permission requests are asynchronous. Never replay the pending action.
+            return false
+        }
+        return true
+    }
+}
+
 /// A deliberately small Accessibility bridge. It exposes no screenshots and only
 /// accepts actions against elements returned by the most recent inspection.
 @MainActor
@@ -20,12 +51,15 @@ final class NativeComputerUseService {
         "com.apple.passwords"
     ]
 
+    private let permission: AccessibilityPermissionGate
+
+    init(permission: AccessibilityPermissionGate = .shared) {
+        self.permission = permission
+    }
+
     func handle(_ request: AgentDynamicToolRequest) async -> AgentDynamicToolResult {
         guard request.namespace == nil, request.toolName == "computer_use" else {
             return .rejected("Unsupported computer-use tool.")
-        }
-        guard AXIsProcessTrusted() else {
-            return .rejected("Accessibility permission is required before Computer Use can inspect or act on apps.")
         }
         guard let arguments = arguments(from: request.arguments) else {
             return .rejected("computer_use requires action and app_bundle_id string arguments.")
@@ -36,6 +70,21 @@ final class NativeComputerUseService {
         guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: arguments.bundleID).first,
               !application.isTerminated else {
             return .rejected("The requested app is not running.")
+        }
+
+        guard ["inspect", "press", "set_text"].contains(arguments.action) else {
+            return .rejected("computer_use action must be inspect, press, or set_text.")
+        }
+        if arguments.action != "inspect", arguments.elementID == nil {
+            return .rejected("computer_use \(arguments.action) requires an element_id from the current inspection.")
+        }
+        if arguments.action == "set_text", arguments.text == nil || arguments.text!.utf8.count > 16_384 {
+            return .rejected("set_text requires text up to 16 KiB.")
+        }
+        guard permission.authorize() else {
+            snapshotID = UUID()
+            elements.removeAll()
+            return .rejected("Accessibility permission is required. FS Code requested macOS authorization; enable this copy of FS Code in System Settings → Privacy & Security → Accessibility, then retry with inspect. If no prompt appears, use Open Accessibility Settings… in project permissions. No action was performed or queued.")
         }
 
         switch arguments.action {

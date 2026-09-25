@@ -220,6 +220,24 @@ final class AgentConversationQueueTests: XCTestCase {
         XCTAssertEqual(manager.queuedMessages.map(\.text), ["will fail"])
     }
 
+    func testRateLimitedResponsePausesQueueWithActionableReason() async throws {
+        let project = try makeProject()
+        defer { try? FileManager.default.removeItem(at: project) }
+        let transport = QueueTransport()
+        let manager = AgentConversationManager(projectURL: project, transport: transport)
+        try await manager.load()
+        _ = try await manager.newThread()
+        manager.updateDraft("active")
+        await manager.send()
+        manager.updateDraft("pending")
+        await manager.send()
+        transport.failCurrentTurn(message: "The provider rate limit was reached. Wait a moment or switch to another connection.")
+
+        await waitUntil { manager.queueIsPaused && !manager.hasActiveTurn }
+        XCTAssertEqual(manager.queueError, "Queue paused because the provider rate limit was reached. Wait a moment or switch to another connection.")
+        XCTAssertEqual(manager.queuedMessages.map(\.text), ["pending"])
+    }
+
     private func waitUntil(
         _ predicate: @escaping @MainActor () -> Bool,
         file: StaticString = #filePath,
@@ -305,6 +323,17 @@ private final class QueueTransport: AgentConversationTransport {
             sessionID: sessionID,
             method: "turn/completed",
             params: ["threadId": threadID, "turn": ["id": activeTurnID, "status": status, "items": []]]
+        )
+        for observer in runtimeObservers.values { observer(event) }
+    }
+
+    func failCurrentTurn(message: String) {
+        guard let profileID = selectedProfileID, let activeTurnID else { return }
+        let event = AgentConnectionRuntimeEvent(
+            profileID: profileID,
+            sessionID: sessionID,
+            method: "error",
+            params: ["threadId": threadID, "turnId": activeTurnID, "error": ["message": message]]
         )
         for observer in runtimeObservers.values { observer(event) }
     }

@@ -47,7 +47,7 @@ final class PermissionsView: NSView {
         computerUse.action = #selector(changeCapability)
         computerUse.setAccessibilityLabel("Allow Computer Use for this project")
 
-        let requestAccessibility = NSButton(title: "Accessibility Permission…", target: self, action: #selector(requestAccessibilityPermission))
+        let requestAccessibility = NSButton(title: "Open Accessibility Settings…", target: self, action: #selector(requestAccessibilityPermission))
         requestAccessibility.controlSize = .small
         accessibility.font = .systemFont(ofSize: 12)
         accessibility.maximumNumberOfLines = 0
@@ -101,7 +101,13 @@ final class PermissionsView: NSView {
     }
 
     @objc private func requestAccessibilityPermission() {
-        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        _ = AccessibilityPermissionGate.shared.authorize()
+        let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        if !NSWorkspace.shared.open(settingsURL) {
+            status.stringValue = "Could not open System Settings. Open Privacy & Security → Accessibility manually."
+        } else {
+            status.stringValue = ""
+        }
         updateAccessibilityStatus()
     }
 

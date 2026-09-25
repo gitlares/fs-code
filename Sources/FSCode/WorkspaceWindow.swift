@@ -760,14 +760,35 @@ import AgentConnectionCore
     }
 
     func prepareToClose() async -> Bool {
-        guard !closing, window.attachedSheet == nil, !textEditor.isBusy else { return false }
+        NSLog("FSCode close: preparation requested")
+        guard !closing else {
+            NSLog("FSCode close: already preparing a close")
+            return false
+        }
+        guard window.attachedSheet == nil else {
+            NSLog("FSCode close: waiting for an attached sheet")
+            return false
+        }
+        guard !textEditor.isBusy else {
+            NSLog("FSCode close: editor is busy")
+            return false
+        }
         closing = true
-        defer { closing = false }
-        guard projectSidebar.todoDetailView.canLeave(),
-              await agentContextView.prepareToLeave(),
-              await planEditorView.prepareToLeave() else { return false }
+        var prepared = false
+        defer {
+            closing = false
+            NSLog("FSCode close: preparation finished, approved=%d", prepared)
+        }
+        NSLog("FSCode close: checking TODO changes")
+        guard projectSidebar.todoDetailView.canLeave() else { return false }
+        NSLog("FSCode close: checking context changes")
+        guard await agentContextView.prepareToLeave() else { return false }
+        NSLog("FSCode close: checking plan changes")
+        guard await planEditorView.prepareToLeave() else { return false }
+        NSLog("FSCode close: checking document changes")
         guard await textEditor.prepareToClose() else { return false }
         if terminalPane.hasForegroundJob {
+            NSLog("FSCode close: asking to stop terminal command")
             let alert = NSAlert()
             alert.messageText = "Close project and stop the running command?"
             alert.informativeText = "The command running in this project's terminal will be stopped."
@@ -780,7 +801,9 @@ import AgentConnectionCore
             }
             guard shouldStop else { return false }
         }
-        return await assistantConnectionView.flushConversation()
+        NSLog("FSCode close: flushing conversation")
+        prepared = await assistantConnectionView.flushConversation()
+        return prepared
     }
 
     func shutdownAssistant() async {

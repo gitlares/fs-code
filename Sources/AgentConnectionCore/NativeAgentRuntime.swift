@@ -329,6 +329,12 @@ final class NativeAgentRuntime: AgentEngine {
     }
 
     private static func safeFailureMessage(_ error: Error) -> String {
+        if case AgentError.llmError(.rateLimited) = error {
+            return rateLimitFailureMessage
+        }
+        if case TransportError.rateLimited = error {
+            return rateLimitFailureMessage
+        }
         let category: String
         if let failure = error as? RuntimeError {
             switch failure {
@@ -351,6 +357,8 @@ final class NativeAgentRuntime: AgentEngine {
         else { category = "unexpected-error" }
         return "The response could not be completed (\(category))."
     }
+
+    private static let rateLimitFailureMessage = "The provider rate limit was reached. Wait a moment or switch to another connection."
 
     private static func safeTransportFailureCategory(_ transport: TransportError) -> String {
         switch transport {

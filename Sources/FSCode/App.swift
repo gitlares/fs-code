@@ -287,20 +287,30 @@ import EditorCore
         for workspace in workspaces.values { workspace.saveLayout(); workspace.shutdownTerminal() }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminationInProgress else { return .terminateCancel }
+        NSLog("FSCode termination: request received")
+        guard !terminationInProgress else {
+            NSLog("FSCode termination: another termination request is still pending")
+            return .terminateCancel
+        }
         terminationInProgress = true
         let windows = Array(workspaces.values)
+        NSLog("FSCode termination: preparing %ld workspace(s)", windows.count)
         Task {
-            for workspace in windows {
+            for (index, workspace) in windows.enumerated() {
+                NSLog("FSCode termination: preparing workspace %ld", index)
                 guard await workspace.prepareToClose() else {
+                    NSLog("FSCode termination: workspace %ld declined close", index)
                     terminationInProgress = false
                     sender.reply(toApplicationShouldTerminate: false)
                     return
                 }
             }
-            for workspace in windows {
+            for (index, workspace) in windows.enumerated() {
+                NSLog("FSCode termination: shutting down assistant %ld", index)
                 await workspace.shutdownAssistant()
+                NSLog("FSCode termination: assistant %ld stopped", index)
             }
+            NSLog("FSCode termination: replying with approval")
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
