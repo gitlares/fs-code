@@ -128,7 +128,9 @@ import AgentConnectionCore
         )
         self.projectSidebar = projectSidebar
         sidebar.view = projectSidebar
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        // A regular split item keeps the left panel rectangular like the assistant.
+        // `sidebarWithViewController` adds AppKit's rounded sidebar treatment.
+        let sidebarItem = NSSplitViewItem(viewController: sidebar)
         self.sidebarItem = sidebarItem
 
         let editor = NSViewController()

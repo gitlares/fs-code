@@ -384,8 +384,10 @@ final class NativeAgentRuntime: AgentEngine {
                 emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "originalCommand": result.originalArguments.joined(separator: " "), "effectiveCommand": result.effectiveArguments.joined(separator: " "), "rtkApplied": result.rtkApplied, "cwd": configuration.projectRoot.path, "status": result.exitCode == 0 ? "completed" : "failed", "exitCode": result.exitCode, "output": result.output]])
                 return "exit \(result.exitCode)\(result.timedOut ? " (timed out)" : "")\(result.outputWasTruncated ? " (output truncated)" : "")\(result.rtkApplied ? " (RTK applied)" : "")\n\(result.output)"
             } catch {
-                emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "cwd": configuration.projectRoot.path, "status": "failed", "output": "The development command could not be started."]])
-                return "The development command could not be started."
+                let diagnostic = (error as? LocalizedError)?.errorDescription ?? "The development command could not be started."
+                let message = "The development command could not be started: \(diagnostic)"
+                emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "cwd": configuration.projectRoot.path, "status": "failed", "output": message]])
+                return message
             }
         }
         if call.name == "fs_edit_file", let path = arguments["relative_path"] as? String,

@@ -11,7 +11,20 @@ public struct ProjectCommandResult: Sendable, Equatable {
     public let rtkApplied: Bool
 }
 
-public enum ProjectCommandError: Error, Sendable { case invalid; case unavailable }
+public enum ProjectCommandError: Error, Sendable, LocalizedError {
+    case invalid
+    case unavailable(errno: Int32, message: String, executable: String?)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalid:
+            return "Invalid project command."
+        case let .unavailable(errno, message, executable):
+            let subject = executable.map { " for \($0)" } ?? ""
+            return "Project command launch failed\(subject) (errno \(errno)): \(message)"
+        }
+    }
+}
 
 /// Executes one host-approved argv invocation. A command gets its own process group, so its
 /// cancellation never affects another conversation using the shared connection runtime.
@@ -57,14 +70,17 @@ public actor ProjectCommandRunner {
         timeout: TimeInterval = 120,
         maxOutputBytes: Int = 65_536
     ) async throws -> ProjectCommandResult {
-        guard let executable = arguments.first,
-              executable.hasPrefix("/"),
+        guard let requestedExecutable = arguments.first,
               arguments.count <= 64,
               !arguments.contains(where: { $0.utf8.contains(0) }),
               timeout > 0, timeout <= 1_800,
               maxOutputBytes > 0, maxOutputBytes <= 1_048_576 else { throw ProjectCommandError.invalid }
 
-        let command = Self.effectiveArguments(for: arguments, rtkExecutablePath: rtkExecutablePath)
+        guard let executable = Self.resolveExecutable(requestedExecutable, projectRoot: root) else {
+            throw Self.launchError(ENOENT, executable: requestedExecutable)
+        }
+
+        let command = Self.effectiveArguments(for: [executable] + arguments.dropFirst(), rtkExecutablePath: rtkExecutablePath)
         let pipe = try Self.makePipe()
         var spawned = false
         defer {
@@ -137,6 +153,35 @@ public actor ProjectCommandRunner {
         for invocation in invocations.values { Self.terminateProcessGroup(invocation.pid) }
     }
 
+    /// Accept absolute executable paths as supplied. Bare names are resolved only against absolute
+    /// PATH entries, in order; empty and relative entries are ignored so the project directory is
+    /// never searched implicitly.
+    static func resolveExecutable(
+        _ executable: String,
+        path: String? = ProcessInfo.processInfo.environment["PATH"],
+        projectRoot: URL? = nil
+    ) -> String? {
+        guard !executable.isEmpty else { return nil }
+        if executable.hasPrefix("/") { return executable }
+        guard !executable.contains("/") else { return nil }
+        let pathEntries = path?.split(separator: ":", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { $0.hasPrefix("/") } ?? []
+        let fallbackEntries = ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+        let resolvedRoot = projectRoot?.resolvingSymlinksInPath().standardizedFileURL.path
+        for entry in pathEntries + fallbackEntries {
+            let candidateURL = URL(fileURLWithPath: entry).appendingPathComponent(executable).standardizedFileURL
+            let candidate = candidateURL.path
+            let resolvedCandidate = candidateURL.resolvingSymlinksInPath().standardizedFileURL.path
+            if let resolvedRoot,
+               resolvedCandidate == resolvedRoot || resolvedCandidate.hasPrefix(resolvedRoot + "/") {
+                continue
+            }
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        return nil
+    }
+
     private func timeOut(runID: UUID) {
         guard let invocation = invocations[runID] else { return }
         invocation.markTimedOut()
@@ -145,7 +190,7 @@ public actor ProjectCommandRunner {
 
     private static func makePipe() throws -> (read: Int32, write: Int32) {
         var descriptors: [Int32] = [0, 0]
-        guard pipe(&descriptors) == 0 else { throw ProjectCommandError.unavailable }
+        guard pipe(&descriptors) == 0 else { throw launchError(errno) }
         _ = fcntl(descriptors[0], F_SETFD, FD_CLOEXEC)
         _ = fcntl(descriptors[1], F_SETFD, FD_CLOEXEC)
         return (descriptors[0], descriptors[1])
@@ -163,28 +208,43 @@ public actor ProjectCommandRunner {
     private static func spawn(executable: String, arguments: [String], workingDirectory: String, outputFD: Int32) throws -> pid_t {
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
-        guard posix_spawn_file_actions_init(&actions) == 0, posix_spawnattr_init(&attributes) == 0 else { throw ProjectCommandError.unavailable }
+        let fileActionsResult = posix_spawn_file_actions_init(&actions)
+        guard fileActionsResult == 0 else { throw launchError(fileActionsResult) }
+        let attributesResult = posix_spawnattr_init(&attributes)
+        guard attributesResult == 0 else {
+            posix_spawn_file_actions_destroy(&actions)
+            throw launchError(attributesResult)
+        }
         defer { posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes) }
-        guard posix_spawn_file_actions_adddup2(&actions, outputFD, STDOUT_FILENO) == 0,
-              posix_spawn_file_actions_adddup2(&actions, outputFD, STDERR_FILENO) == 0,
-              posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0,
-              posix_spawn_file_actions_addclose(&actions, outputFD) == 0,
-              posix_spawn_file_actions_addchdir_np(&actions, workingDirectory) == 0 else { throw ProjectCommandError.unavailable }
+        for result in [
+            posix_spawn_file_actions_adddup2(&actions, outputFD, STDOUT_FILENO),
+            posix_spawn_file_actions_adddup2(&actions, outputFD, STDERR_FILENO),
+            posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
+            posix_spawn_file_actions_addclose(&actions, outputFD),
+            posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
+        ] where result != 0 { throw launchError(result) }
         var signalMask = sigset_t()
         var defaultSignals = sigset_t()
         sigemptyset(&signalMask)
         sigfillset(&defaultSignals)
         let flags = Int16(truncatingIfNeeded: POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)
-        guard posix_spawnattr_setflags(&attributes, flags) == 0,
-              posix_spawnattr_setpgroup(&attributes, 0) == 0,
-              posix_spawnattr_setsigmask(&attributes, &signalMask) == 0,
-              posix_spawnattr_setsigdefault(&attributes, &defaultSignals) == 0 else { throw ProjectCommandError.unavailable }
+        for result in [
+            posix_spawnattr_setflags(&attributes, flags),
+            posix_spawnattr_setpgroup(&attributes, 0),
+            posix_spawnattr_setsigmask(&attributes, &signalMask),
+            posix_spawnattr_setsigdefault(&attributes, &defaultSignals)
+        ] where result != 0 { throw launchError(result) }
         let cArguments = arguments.map { value in value.withCString { strdup($0) } }
         defer { cArguments.forEach { free($0) } }
         var argv = cArguments + [nil]
         var pid: pid_t = 0
-        guard posix_spawn(&pid, executable, &actions, &attributes, &argv, environ) == 0 else { throw ProjectCommandError.unavailable }
+        let spawnResult = posix_spawn(&pid, executable, &actions, &attributes, &argv, environ)
+        guard spawnResult == 0 else { throw launchError(spawnResult) }
         return pid
+    }
+
+    private static func launchError(_ errorNumber: Int32, executable: String? = nil) -> ProjectCommandError {
+        .unavailable(errno: errorNumber, message: String(cString: strerror(errorNumber)), executable: executable)
     }
 
     private static func waitForExit(_ pid: pid_t, into state: ExitState) {

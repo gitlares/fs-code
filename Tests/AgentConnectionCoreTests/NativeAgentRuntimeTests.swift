@@ -313,6 +313,37 @@ final class NativeAgentRuntimeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
+    func testCommandLaunchFailureIncludesSafeSystemDiagnosticInToolOutput() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: support) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try await ProjectCapabilityStore(projectURL: root, applicationSupportURL: support)
+            .setEnabled(.developmentCommands, enabled: true)
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: UUID(), projectRoot: root, profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil, capabilityRoot: support),
+            makeClient: { _ in
+                ScriptedClient(script: [
+                    .toolCallStart(index: 0, id: "command", name: "run_development_command", kind: .function),
+                    .toolCallDelta(index: 0, arguments: "{\"arguments\":[\"missing-project-command\"]}"),
+                    .finished(usage: nil)
+                ])
+            }
+        )
+        var items: [[String: Any]] = []
+        runtime.onNotification = { method, params in
+            if method == "item/completed", let item = params["item"] as? [String: Any] { items.append(item) }
+        }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "run"]]])
+        await waitUntil { !items.isEmpty }
+        let output = try XCTUnwrap(items.first?["output"] as? String)
+        XCTAssertTrue(output.contains("errno \(ENOENT)"))
+        XCTAssertTrue(output.contains("could not be started"))
+        XCTAssertTrue(output.contains("missing-project-command"))
+    }
+
     func testPlanWriterRejectsSymlinkedPlanTarget() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -41,30 +41,36 @@ final class ProjectCapabilityStoreTests: XCTestCase {
         XCTAssertTrue(capped.outputWasTruncated)
     }
 
-    func testRunnerCanPushToLocalBareGitRemote() async throws {
+    func testRunnerResolvesBareGitAndCanPushToLocalBareRemote() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let remote = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".git")
         defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: remote) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let runner = ProjectCommandRunner(projectURL: root)
         for command in [
-            ["/usr/bin/git", "init"],
-            ["/usr/bin/git", "config", "user.email", "tests@example.invalid"],
-            ["/usr/bin/git", "config", "user.name", "Tests"],
+            ["git", "init"],
+            ["git", "config", "user.email", "tests@example.invalid"],
+            ["git", "config", "user.name", "Tests"],
             ["/bin/sh", "-c", "printf test > file.txt"],
-            ["/usr/bin/git", "add", "file.txt"],
-            ["/usr/bin/git", "commit", "-m", "initial"],
-            ["/usr/bin/git", "branch", "-M", "main"]
+            ["git", "add", "file.txt"],
+            ["git", "commit", "-m", "initial"],
+            ["git", "branch", "-M", "main"]
         ] {
             let result = try await runner.run(arguments: command, timeout: 10)
             XCTAssertEqual(result.exitCode, 0)
+            XCTAssertEqual(result.originalArguments, command)
         }
-        let bare = try await runner.run(arguments: ["/usr/bin/git", "init", "--bare", remote.path], timeout: 10)
-        let addRemote = try await runner.run(arguments: ["/usr/bin/git", "remote", "add", "origin", remote.path], timeout: 10)
-        let push = try await runner.run(arguments: ["/usr/bin/git", "push", "origin", "main"], timeout: 10)
+        let bare = try await runner.run(arguments: ["git", "init", "--bare", remote.path], timeout: 10)
+        let addRemote = try await runner.run(arguments: ["git", "remote", "add", "origin", remote.path], timeout: 10)
+        let push = try await runner.run(arguments: ["git", "push", "origin", "main"], timeout: 10)
         XCTAssertEqual(bare.exitCode, 0)
         XCTAssertEqual(addRemote.exitCode, 0)
         XCTAssertEqual(push.exitCode, 0)
+    }
+
+    func testRunnerFindsGitInFixedFallbackWhenPATHIsMinimal() {
+        let resolved = ProjectCommandRunner.resolveExecutable("git", path: "/definitely/missing")
+        XCTAssertEqual(resolved, "/usr/bin/git")
     }
 
     func testCancellingOneInvocationKillsItsChildrenWithoutAffectingAnother() async throws {
@@ -119,5 +125,32 @@ final class ProjectCapabilityStoreTests: XCTestCase {
         let absent = ProjectCommandRunner.effectiveArguments(for: ["/usr/bin/git", "status"], rtkExecutablePath: nil)
         XCTAssertEqual(absent.arguments, ["/usr/bin/git", "status"])
         XCTAssertFalse(absent.applied)
+    }
+
+    func testRunnerRejectsUnresolvableAndRelativeExecutablePathsWithDiagnostic() async throws {
+        XCTAssertNil(ProjectCommandRunner.resolveExecutable("missing-project-command", path: ".:/tmp::relative"))
+        XCTAssertNil(ProjectCommandRunner.resolveExecutable("bin/git", path: "/usr/bin"))
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pathAlias = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: pathAlias) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let projectExecutable = root.appendingPathComponent("project-only-command")
+        FileManager.default.createFile(atPath: projectExecutable.path, contents: Data())
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: projectExecutable.path)
+        try FileManager.default.createSymbolicLink(at: pathAlias, withDestinationURL: root)
+        XCTAssertNil(ProjectCommandRunner.resolveExecutable("project-only-command", path: pathAlias.path, projectRoot: root))
+        let runner = ProjectCommandRunner(projectURL: root)
+        do {
+            _ = try await runner.run(arguments: ["missing-project-command-\(UUID().uuidString)"])
+            XCTFail("Missing executable was launched")
+        } catch let error as ProjectCommandError {
+            guard case let .unavailable(errno, message, executable) = error else { return XCTFail("Expected launch error") }
+            XCTAssertEqual(errno, ENOENT)
+            XCTAssertTrue(executable?.hasPrefix("missing-project-command-") == true)
+            XCTAssertFalse(message.isEmpty)
+            XCTAssertEqual(error.errorDescription?.contains("errno \(ENOENT)"), true)
+            XCTAssertTrue(error.errorDescription?.contains(executable ?? "") == true)
+        }
     }
 }
