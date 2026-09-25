@@ -3,13 +3,13 @@
     <channel>
         <title>FS Code</title>
         <item>
-            <title>0.1.3</title>
-            <pubDate>Fri, 25 Sep 2026 11:28:45 -0600</pubDate>
-            <sparkle:version>4</sparkle:version>
-            <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
+            <title>0.1.4</title>
+            <pubDate>Fri, 25 Sep 2026 12:04:26 -0600</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/gitlares/fs-code/releases/download/v0.1.3-alpha.1/FS-Code-0.1.3-arm64.zip" length="7162592" type="application/octet-stream" sparkle:edSignature="UqX9sinnhXrVgDahS0ubgttH7dPfTIOp3D9rgehSaEewQIZ+2YbrHml++VZUP36iA8IL+XwR9NL6Y/NYuIJwCg=="/>
+            <enclosure url="https://github.com/gitlares/fs-code/releases/download/v0.1.4-alpha.1/FS-Code-0.1.4-arm64.zip" length="7166478" type="application/octet-stream" sparkle:edSignature="Wc1d4Owz65jvgxGEMvT/+jrWL1g8Ghjtr/p8cdVFAiaMMCqJJU4q99a9+xOEd5xz5ZZ2FYrEgMChT9znQ2xVAw=="/>
         </item>
     </channel>
 </rss>
