@@ -110,6 +110,7 @@ final class NativeAgentRuntime: AgentEngine {
         case "thread/resume":
             guard let id = params["threadId"] as? String else { throw RuntimeError.malformed }
             if threads[id] == nil { threads[id] = try historyStore.load(threadID: id) ?? Self.baseline(from: params) }
+            threads[id] = historyStore.repairInterruptedTools(threads[id] ?? [])
             threadModes[id] = try Self.mode(from: params)
             selectedPlans[id] = params["selectedPlanID"] as? String
             threadHostMetadata[id] = params["hostMetadata"] as? String ?? ""
@@ -121,6 +122,7 @@ final class NativeAgentRuntime: AgentEngine {
                   let input = Self.inputText(from: params),
                   var history = threads[threadID] else { throw RuntimeError.malformed }
             guard !runs.values.contains(where: { $0.threadID == threadID }) else { throw RuntimeError.unavailable }
+            history = historyStore.repairInterruptedTools(history)
             let turnID = UUID().uuidString
             history.append(.user(input))
             threads[threadID] = history
@@ -335,32 +337,45 @@ final class NativeAgentRuntime: AgentEngine {
             default: category = "runtime-validation"
             }
         } else if case let AgentError.llmError(transport) = error {
-            switch transport {
-            case .streamFailed(let stream):
-                switch stream {
-                case .malformedStream(let reason, _):
-                    switch reason {
-                    case .finalizedSemanticStateDiverged: category = "stream-state-mismatch"
-                    case .finalizedFieldDiverged(let field):
-                        let allowed = ["reasoning", "reasoning-details", "content", "content-empty", "tool-indices", "tool-arguments"]
-                        category = allowed.contains(field) ? "stream-mismatch-" + field : "stream-state-mismatch"
-                    case .conflictingAssistantContinuity: category = "stream-continuity-mismatch"
-                    default: category = "malformed-tool-stream"
-                    }
-                case .idleTimeout: category = "stream-timeout"
-                case .providerTerminationMissing: category = "provider-finish-missing"
-                case .finishedDeltaMissing: category = "sdk-finish-missing"
-                case .midStreamTransportFailure: category = "connection-interrupted"
-                case .providerError: category = "provider-error"
-                }
-            case .decodingFailed: category = "response-decoding"
-            case .httpError(let status, _): category = "http-\(status)"
-            case .rateLimited: category = "rate-limited"
-            default: category = "provider-transport"
-            }
+            category = safeTransportFailureCategory(transport)
+        } else if let transport = error as? TransportError {
+            // LLMClient implementers may end an AsyncThrowingStream with the transport error
+            // directly. Keep this equivalent to the AgentError-wrapped path and never expose
+            // the HTTP body or provider message.
+            category = safeTransportFailureCategory(transport)
+        } else if error is AgentError {
+            // Request construction validates tool-call ordering. A damaged persisted history
+            // must be distinguishable from an unknown runtime failure, without disclosing it.
+            category = "history-invalid"
         } else if error is CocoaError { category = "local-history" }
         else { category = "unexpected-error" }
         return "The response could not be completed (\(category))."
+    }
+
+    private static func safeTransportFailureCategory(_ transport: TransportError) -> String {
+        switch transport {
+        case .streamFailed(let stream):
+            switch stream {
+            case .malformedStream(let reason, _):
+                switch reason {
+                case .finalizedSemanticStateDiverged: return "stream-state-mismatch"
+                case .finalizedFieldDiverged(let field):
+                    let allowed = ["reasoning", "reasoning-details", "content", "content-empty", "tool-indices", "tool-arguments"]
+                    return allowed.contains(field) ? "stream-mismatch-" + field : "stream-state-mismatch"
+                case .conflictingAssistantContinuity: return "stream-continuity-mismatch"
+                default: return "malformed-tool-stream"
+                }
+            case .idleTimeout: return "stream-timeout"
+            case .providerTerminationMissing: return "provider-finish-missing"
+            case .finishedDeltaMissing: return "sdk-finish-missing"
+            case .midStreamTransportFailure: return "connection-interrupted"
+            case .providerError: return "provider-error"
+            }
+        case .decodingFailed: return "response-decoding"
+        case .httpError(let status, _): return "http-\(status)"
+        case .rateLimited: return "rate-limited"
+        default: return "provider-transport"
+        }
     }
 
     private func execute(_ call: ToolCall, mode: AgentMode, selectedPlanID: String?, threadID: String, turnID: String) async -> String {

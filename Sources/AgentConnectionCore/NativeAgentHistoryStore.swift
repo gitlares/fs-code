@@ -63,17 +63,58 @@ struct NativeAgentHistoryStore {
         if create && !FileManager.default.fileExists(atPath: root.path) { throw NativeAgentRuntime.RuntimeError.malformed }
     }
 
-    private func repairInterruptedTools(_ messages: [ChatMessage]) -> [ChatMessage] {
+    /// Restores tool-call ordering after an interrupted runtime. A previous version appended
+    /// synthetic results at the end of the history, which left intervening user messages ahead
+    /// of their tool result and made the next provider request invalid.
+    func repairInterruptedTools(_ messages: [ChatMessage]) -> [ChatMessage] {
         var repaired: [ChatMessage] = []
         var outstanding: [ToolCall] = []
-        for message in messages {
-            if case let .tool(id, _, _) = message { outstanding.removeAll { $0.id == id } }
-            if case let .assistant(assistant) = message { outstanding.append(contentsOf: assistant.toolCalls) }
-            repaired.append(message)
+        var relocatedSyntheticResults = Set<Int>()
+
+        func syntheticResult(for call: ToolCall) -> ChatMessage {
+            .tool(id: call.id, name: call.name, content: Self.interruptedToolMessage)
         }
-        for call in outstanding {
-            repaired.append(.tool(id: call.id, name: call.name, content: "Tool execution was interrupted before this session closed. It was not replayed."))
+
+        func deferredSyntheticResult(for call: ToolCall, after index: Int) -> (index: Int, message: ChatMessage)? {
+            for candidate in messages.indices where candidate > index && !relocatedSyntheticResults.contains(candidate) {
+                guard case let .tool(id, _, content) = messages[candidate],
+                      id == call.id, content == Self.interruptedToolMessage
+                else { continue }
+                return (candidate, messages[candidate])
+            }
+            return nil
         }
+
+        func closeOutstanding(before index: Int) {
+            for call in outstanding {
+                if let deferred = deferredSyntheticResult(for: call, after: index) {
+                    relocatedSyntheticResults.insert(deferred.index)
+                    repaired.append(deferred.message)
+                } else {
+                    repaired.append(syntheticResult(for: call))
+                }
+            }
+            outstanding.removeAll()
+        }
+
+        for (index, message) in messages.enumerated() {
+            if relocatedSyntheticResults.contains(index) { continue }
+            switch message {
+            case let .assistant(assistant):
+                if !outstanding.isEmpty { closeOutstanding(before: index) }
+                repaired.append(message)
+                outstanding = assistant.toolCalls
+            case let .tool(id, _, _):
+                repaired.append(message)
+                if outstanding.first?.id == id { outstanding.removeFirst() }
+            case .system, .user, .userMultimodal:
+                if !outstanding.isEmpty { closeOutstanding(before: index) }
+                repaired.append(message)
+            }
+        }
+        if !outstanding.isEmpty { closeOutstanding(before: messages.endIndex) }
         return repaired
     }
+
+    private static let interruptedToolMessage = "Tool execution was interrupted before this session closed. It was not replayed."
 }

@@ -5,6 +5,46 @@ import XCTest
 
 @MainActor
 final class NativeAgentRuntimeTests: XCTestCase {
+    func testDirectTransportStreamFailureUsesSafeHTTPCategory() async throws {
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: UUID(), projectRoot: URL(fileURLWithPath: "/tmp"), profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil),
+            makeClient: { _ in
+                ThrowingClient(error: TransportError.httpError(statusCode: 401, body: "access token must stay private"))
+            }
+        )
+        var errors: [String] = []
+        runtime.onNotification = { method, params in
+            if method == "error", let error = params["error"] as? [String: Any], let message = error["message"] as? String {
+                errors.append(message)
+            }
+        }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "Hello"]]])
+        await waitUntil { !errors.isEmpty }
+        XCTAssertEqual(errors, ["The response could not be completed (http-401)."])
+        XCTAssertFalse(errors.joined().contains("private"))
+    }
+
+    func testMalformedHistoryFailureIsNotReportedAsUnexpected() async throws {
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: UUID(), projectRoot: URL(fileURLWithPath: "/tmp"), profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil),
+            makeClient: { _ in throw AgentError.malformedHistory(.unexpectedToolResult(id: "internal-tool-id")) }
+        )
+        var errors: [String] = []
+        runtime.onNotification = { method, params in
+            if method == "error", let error = params["error"] as? [String: Any], let message = error["message"] as? String {
+                errors.append(message)
+            }
+        }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "Hello"]]])
+        await waitUntil { !errors.isEmpty }
+        XCTAssertEqual(errors, ["The response could not be completed (history-invalid)."])
+        XCTAssertFalse(errors.joined().contains("internal-tool-id"))
+    }
+
     func testStreamsFinalAndUsesSameTurnForSteerBoundary() async throws {
         let configuration = NativeAgentRuntime.Configuration(
             projectID: UUID(), projectRoot: URL(fileURLWithPath: "/tmp"), profileID: UUID(),
@@ -397,6 +437,20 @@ private struct ScriptedClient: LLMClient {
             continuation.yield(.streamClosed(terminalMarkerSeen: true))
             continuation.finish()
         }
+    }
+}
+
+private struct ThrowingClient: LLMClient {
+    let error: Error
+    var contextWindowSize: Int? { 128_000 }
+    var providerIdentifier: ProviderIdentifier { .openAIResponses }
+
+    func generate(messages: [ChatMessage], tools: [ToolDefinition], responseFormat: ResponseFormat?, requestContext: RequestContext?) async throws -> AssistantMessage {
+        AssistantMessage(content: "")
+    }
+
+    func stream(messages: [ChatMessage], tools: [ToolDefinition], requestContext: RequestContext?) -> AsyncThrowingStream<StreamDelta, Error> {
+        AsyncThrowingStream { continuation in continuation.finish(throwing: error) }
     }
 }
 

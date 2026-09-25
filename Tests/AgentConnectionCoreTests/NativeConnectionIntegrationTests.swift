@@ -99,6 +99,31 @@ final class NativeConnectionIntegrationTests: XCTestCase {
         XCTAssertNil(try NativeAgentHistoryStore(projectID: project, profileID: UUID(), rootOverride: root).load(threadID: "thread"))
     }
 
+    func testHistoryMovesDeferredInterruptedToolResultBeforeLaterUserMessages() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeAgentHistoryStore(projectID: UUID(), profileID: UUID(), rootOverride: root)
+        let call = ToolCall(id: "pending", name: "fs_edit_file", arguments: "{}")
+        let interrupted = "Tool execution was interrupted before this session closed. It was not replayed."
+        try store.save(threadID: "thread", messages: [
+            .assistant(.init(content: "", toolCalls: [call])),
+            .user("What were you doing? I only said hello."),
+            .user("hello"),
+            .tool(id: call.id, name: call.name, content: interrupted),
+            .user("hello again")
+        ])
+
+        let restored = try XCTUnwrap(store.load(threadID: "thread"))
+        XCTAssertEqual(restored.count, 5)
+        guard case let .tool(id, name, content) = restored[1] else {
+            return XCTFail("Interrupted result must immediately follow its tool call")
+        }
+        XCTAssertEqual(id, call.id)
+        XCTAssertEqual(name, call.name)
+        XCTAssertEqual(content, interrupted)
+        XCTAssertEqual(restored.filter { if case .tool = $0 { return true }; return false }.count, 1)
+    }
+
     func testCatalogUsesBackendCapabilitiesAndFiltersUnsupportedEntries() throws {
         let data = Data(#"{"models":[{"slug":"test","display_name":"Test","visibility":"list","context_window":272000,"max_context_window":872000,"supported_reasoning_levels":[{"effort":"medium"},{"effort":"ultra"}],"default_reasoning_level":"medium"},{"slug":"hidden","visibility":"hide"}]}"#.utf8)
         let catalog = try NativeProviderConnection.parseCatalog(data, kind: .chatGPT)

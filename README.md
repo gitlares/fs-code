@@ -4,7 +4,7 @@
 
 FS Code is an early, MIT-licensed editor built with Swift and AppKit. No Electron, no Monaco, and no VS Code dependency. Created by Daniel Lares with Codex.
 
-**0.1.2 Alpha** · macOS 15+ · English interface
+**0.1.3 Alpha** · macOS 15+ · English interface
 
 This is a working prototype, not a finished IDE. Expect rough edges and keep your projects backed up. Performance is a design priority; we do not yet claim benchmark superiority over other editors.
 
@@ -39,7 +39,7 @@ The native agent currently exposes bounded project tools. It is not a full auton
 
 ## Download and run
 
-Download [FS Code 0.1.2 Alpha for Apple Silicon](https://github.com/gitlares/fs-code/releases/download/v0.1.2-alpha.1/FS-Code-0.1.2-arm64.zip), extract **FS Code.app**, and move it to Applications. This macOS 15+ build is Developer ID signed and notarized by Apple. See the [release notes and checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.2-alpha.1).
+Download [FS Code 0.1.3 Alpha for Apple Silicon](https://github.com/gitlares/fs-code/releases/download/v0.1.3-alpha.1/FS-Code-0.1.3-arm64.zip), extract **FS Code.app**, and move it to Applications. This macOS 15+ build is Developer ID signed and notarized by Apple. See the [release notes and checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.3-alpha.1).
 
 AI features require your own supported account or API key. Opening a project and using the editor do not require an FS Code account.
 
