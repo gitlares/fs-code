@@ -406,7 +406,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         let range = NSRange(location: 0, length: text.length)
         guard range.length > 0 else { return }
         var attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .font: UIFont.text(ofSize: NSFont.systemFontSize),
             .foregroundColor: NSColor.labelColor
         ]
         let paragraph = NSMutableParagraphStyle()
@@ -415,7 +415,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         switch block?.kind {
         case let .heading(level):
             let sizes: [CGFloat] = presentation == .assistant ? [22, 20, 18, 16, 15, 14] : [28, 24, 20, 18, 16, 14]
-            attributes[.font] = NSFont.systemFont(ofSize: sizes[max(0, min(level - 1, sizes.count - 1))], weight: .bold)
+            attributes[.font] = UIFont.text(ofSize: sizes[max(0, min(level - 1, sizes.count - 1))], weight: .bold)
             paragraph.paragraphSpacingBefore = 12
             paragraph.paragraphSpacing = 8
         case .listItem:
@@ -438,7 +438,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
             paragraph.lineBreakMode = .byCharWrapping
         } else {
             var font = attributes[.font] as! NSFont
-            if isBold, presentation == .assistant { font = NSFont.systemFont(ofSize: font.pointSize, weight: .semibold) }
+            if isBold, presentation == .assistant { font = UIFont.text(ofSize: font.pointSize, weight: .semibold) }
             else if isBold { font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) }
             if isItalic { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
             attributes[.font] = font
@@ -453,6 +453,6 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.firstLineHeadIndent = 0
         paragraph.headIndent = 22
-        return [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph]
+        return [.font: UIFont.text(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph]
     }
 }

@@ -179,7 +179,7 @@ import EditorCore
     @objc private func showAboutPanel() {
         let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
         let creditsAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: UIFont.text(ofSize: 12),
             .foregroundColor: NSColor.labelColor
         ]
         let credits = NSMutableAttributedString(string: "Created by Daniel Lares with Codex.\n\n", attributes: creditsAttributes)
@@ -216,7 +216,7 @@ import EditorCore
     }
     private func appendCreditLink(to credits: NSMutableAttributedString, title: String, resource: String) {
         var attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: UIFont.text(ofSize: 12),
             .foregroundColor: NSColor.linkColor
         ]
         if let url = Bundle.main.url(forResource: resource, withExtension: "txt") { attributes[.link] = url }

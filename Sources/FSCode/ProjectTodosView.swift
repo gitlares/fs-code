@@ -36,7 +36,7 @@ import ProjectLibrary
             do {
                 guard let source = try store.inlineSource(for: todo) else { return }
                 onOpenFile?(source.url, source.location.line)
-            } catch { NSAlert(error: error).runModal() }
+            } catch { self.presentTodoError(error) }
         }
         let refresh = NSButton()
         for (button, symbol, label, action) in [
@@ -96,20 +96,22 @@ import ProjectLibrary
     required init?(coder: NSCoder) { fatalError("init(coder:) unavailable") }
 
     @objc func reload() {
-        guard detailView.canLeave() else { return }
-        do {
-            if let store { try store.reload() }
-            else { store = try ProjectTodos(projectURL: projectURL) }
-            rebuildRows()
-            detailView.show(store?.items.first { $0.id == selectedID })
-        } catch {
-            store = nil
-            rows = []
-            table.reloadData()
-            detailView.show(nil)
-            summary.stringValue = error.localizedDescription
+        Task { [weak self] in
+            guard let self, await self.detailView.canLeave() else { return }
+            do {
+                if let store = self.store { try store.reload() }
+                else { self.store = try ProjectTodos(projectURL: self.projectURL) }
+                self.rebuildRows()
+                self.detailView.show(self.store?.items.first { $0.id == self.selectedID })
+            } catch {
+                self.store = nil
+                self.rows = []
+                self.table.reloadData()
+                self.detailView.show(nil)
+                self.summary.stringValue = error.localizedDescription
+            }
+            self.addButton.isEnabled = self.store != nil
         }
-        addButton.isEnabled = store != nil
     }
 
     private func rebuildRows() {
@@ -145,7 +147,7 @@ import ProjectLibrary
             selectedID = todo.id
             rebuildRows()
             return true
-        } catch { NSAlert(error: error).runModal(); return false }
+        } catch { presentTodoError(error); return false }
     }
 
     private func remove(_ id: UUID) -> Bool {
@@ -155,14 +157,23 @@ import ProjectLibrary
             selectedID = nil
             rebuildRows()
             return true
-        } catch { NSAlert(error: error).runModal(); return false }
+        } catch { presentTodoError(error); return false }
+    }
+
+    private func presentTodoError(_ error: Error) {
+        let alert = NSAlert(error: error)
+        if let window { alert.beginSheetModal(for: window) { _ in } }
+        else { alert.runModal() }
     }
 
     @objc private func addTodo() {
-        guard store != nil, detailView.canLeave() else { return }
-        selectedID = nil
-        rebuildRows()
-        detailView.beginNew()
+        guard store != nil else { return }
+        Task { [weak self] in
+            guard let self, await self.detailView.canLeave() else { return }
+            self.selectedID = nil
+            self.rebuildRows()
+            self.detailView.beginNew()
+        }
     }
 
     @objc private func changeOrder() {
@@ -185,17 +196,20 @@ import ProjectLibrary
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !updatingSelection, rows.indices.contains(table.selectedRow), case .todo(let todo) = rows[table.selectedRow] else { return }
         guard todo.id != selectedID else { return }
-        guard detailView.canLeave() else {
-            updatingSelection = true
-            restoreSelection()
-            updatingSelection = false
-            return
-        }
-        selectedID = todo.id
-        detailView.show(todo)
+        // AppKit already applied the visual selection change before this delegate call.
+        // Revert to the previous row immediately, then re-apply the new one only once
+        // canLeave() resolves true, so a cancelled prompt leaves the table consistent.
         updatingSelection = true
         restoreSelection()
         updatingSelection = false
+        Task { [weak self] in
+            guard let self, await self.detailView.canLeave() else { return }
+            self.selectedID = todo.id
+            self.detailView.show(todo)
+            self.updatingSelection = true
+            self.restoreSelection()
+            self.updatingSelection = false
+        }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

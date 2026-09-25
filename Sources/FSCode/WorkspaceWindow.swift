@@ -202,7 +202,9 @@ import AgentConnectionCore
         let assistantConnectionView = AssistantConnectionView(manager: connectionManager, projectURL: url)
         self.assistantConnectionView = assistantConnectionView
         assistant.view = assistantConnectionView
-        let assistantItem = NSSplitViewItem(inspectorWithViewController: assistant)
+        // Use a regular split item so AppKit renders the assistant as a rectangular pane.
+        // `inspectorWithViewController` adds inspector-specific rounded outer treatment.
+        let assistantItem = NSSplitViewItem(viewController: assistant)
         self.assistantItem = assistantItem
 
         super.init()
@@ -780,7 +782,7 @@ import AgentConnectionCore
             NSLog("FSCode close: preparation finished, approved=%d", prepared)
         }
         NSLog("FSCode close: checking TODO changes")
-        guard projectSidebar.todoDetailView.canLeave() else { return false }
+        guard await projectSidebar.todoDetailView.canLeave() else { return false }
         NSLog("FSCode close: checking context changes")
         guard await agentContextView.prepareToLeave() else { return false }
         NSLog("FSCode close: checking plan changes")

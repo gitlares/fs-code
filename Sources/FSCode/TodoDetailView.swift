@@ -72,22 +72,28 @@ import ProjectLibrary
     }
 
     /// Returns false when the user cancels leaving or when saving cannot be completed.
-    func canLeave() -> Bool {
+    func canLeave() async -> Bool {
         guard isDirty else { return true }
+        guard let window else { return false }
         let alert = NSAlert()
         alert.messageText = "Save changes to TODO?"
         alert.informativeText = "Your changes will be lost if you discard them."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            return save()
-        case .alertSecondButtonReturn:
-            show(loadedTodo)
-            return true
-        default:
-            return false
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self else { continuation.resume(returning: false); return }
+                switch response {
+                case .alertFirstButtonReturn:
+                    continuation.resume(returning: self.save())
+                case .alertSecondButtonReturn:
+                    self.show(self.loadedTodo)
+                    continuation.resume(returning: true)
+                default:
+                    continuation.resume(returning: false)
+                }
+            }
         }
     }
 
@@ -258,20 +264,24 @@ import ProjectLibrary
     }
 
     @objc private func deleteClicked() {
-        guard let todo = loadedTodo else { return }
+        guard let todo = loadedTodo, let window else { return }
         let alert = NSAlert()
         alert.messageText = "Delete TODO?"
         alert.informativeText = "“\(todo.title)” and its comments will be removed. This cannot be undone."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Delete")
-        guard alert.runModal() == .alertSecondButtonReturn, onDelete?(todo.id) == true else { return }
-        show(nil)
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertSecondButtonReturn, self.onDelete?(todo.id) == true else { return }
+            self.show(nil)
+        }
     }
 
     @objc private func openLinkedFile() {
-        guard canLeave() else { return }
         guard let todo = loadedTodo, inlineSource(for: todo) != nil else { return }
-        onOpenFile?(todo)
+        Task { [weak self] in
+            guard let self, await self.canLeave() else { return }
+            self.onOpenFile?(todo)
+        }
     }
 
     private func updateActions() {
@@ -338,6 +348,8 @@ import ProjectLibrary
         return field
     }
 
+    private static let textAreaScrollPadding: CGFloat = 8
+
     private func textArea(_ view: TodoTextView, label: String, height: CGFloat) -> NSBox {
         view.isRichText = false
         view.isAutomaticQuoteSubstitutionEnabled = false
@@ -362,9 +374,15 @@ import ProjectLibrary
         box.borderWidth = 0.5
         box.borderColor = .separatorColor
         box.fillColor = .controlBackgroundColor
-        box.cornerRadius = 9
+        box.cornerRadius = Radius.small
         box.contentViewMargins = .zero
-        box.heightAnchor.constraint(equalToConstant: height).isActive = true
+        box.heightAnchor.constraint(greaterThanOrEqualToConstant: height).isActive = true
+        let growConstraint = box.heightAnchor.constraint(equalToConstant: height)
+        growConstraint.priority = .defaultHigh
+        growConstraint.isActive = true
+        view.onHeightChange = { [weak growConstraint] contentHeight in
+            growConstraint?.constant = contentHeight + Self.textAreaScrollPadding
+        }
         let container = box.contentView!
         scroll.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scroll)
@@ -400,12 +418,23 @@ import ProjectLibrary
 
 @MainActor private final class TodoTextView: NSTextView {
     var placeholder = ""
+    var onHeightChange: ((CGFloat) -> Void)?
     override var string: String {
-        didSet { needsDisplay = true }
+        didSet {
+            needsDisplay = true
+            notifyHeightChange()
+        }
     }
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+        notifyHeightChange()
+    }
+    private func notifyHeightChange() {
+        guard let layoutManager, let textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let used = layoutManager.usedRect(for: textContainer)
+        onHeightChange?(ceil(used.height) + textContainerInset.height * 2)
     }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
@@ -414,7 +443,7 @@ import ProjectLibrary
         let rect = NSRect(x: textContainerInset.width + padding, y: textContainerInset.height,
                           width: max(0, bounds.width - 24), height: 40)
         (placeholder as NSString).draw(in: rect, withAttributes: [
-            .font: font ?? NSFont.systemFont(ofSize: 14),
+            .font: font ?? UIFont.text(ofSize: 14),
             .foregroundColor: NSColor.placeholderTextColor
         ])
     }

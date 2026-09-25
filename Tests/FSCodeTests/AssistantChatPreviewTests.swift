@@ -91,6 +91,7 @@ final class AssistantChatPreviewTests: XCTestCase {
                 composer.keyDown(with: try returnEvent(window: window))
                 try await Task.sleep(for: .milliseconds(120))
                 XCTAssertEqual(conversation.queuedMessages.filter { $0.text == "Queue from Return" }.count, 1)
+                XCTAssertEqual(composer.string, "", "Accepted queued messages must clear the composer")
                 let queueCountAfterReturn = conversation.queuedMessages.count
                 composer.string = "Shift newline"
                 composer.keyDown(with: try returnEvent(window: window, modifiers: .shift))
@@ -198,6 +199,7 @@ final class AssistantChatPreviewTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertTrue(conversation.messages.contains { $0.text == "Reveal this newly sent message" })
+        XCTAssertEqual(composer.string, "", "Accepted sent messages must clear the composer")
         try await Task.sleep(for: .milliseconds(120))
         panel.layoutSubtreeIfNeeded()
         let row = try XCTUnwrap(conversation.messages.lastIndex { $0.text == "Reveal this newly sent message" })

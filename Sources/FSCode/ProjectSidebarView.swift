@@ -95,8 +95,13 @@ import AppKit
 
     private func transition(to nextMode: Mode, completion: (() -> Void)? = nil) {
         guard nextMode != mode else { completion?(); return }
-        if mode == .todos, nextMode != .todos, !todos.detailView.canLeave() {
+        if mode == .todos, nextMode != .todos {
             selector.selectedSegment = 1
+            Task { [weak self] in
+                guard let self, await self.todos.detailView.canLeave() else { return }
+                self.apply(nextMode)
+                completion?()
+            }
             return
         }
         if mode == .agentContext, nextMode != .agentContext, let requestLeaveAgentContext {

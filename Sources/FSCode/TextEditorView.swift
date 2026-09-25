@@ -181,17 +181,21 @@ final class TextEditorView: NSView, NSTabViewDelegate, NSTextViewDelegate {
         agentChangesLabel.font = .systemFont(ofSize: 11, weight: .medium)
         agentChangesLabel.textColor = .secondaryLabelColor
         agentChangesLabel.setAccessibilityLabel("AI change navigation")
-        configureAgentChangeSymbolButton(
+        configureIconButton(
             previousAgentChangeButton,
             symbol: "chevron.up",
             label: "Previous AI change",
-            action: #selector(selectPreviousAgentChange)
+            target: self,
+            action: #selector(selectPreviousAgentChange),
+            controlSize: .small
         )
-        configureAgentChangeSymbolButton(
+        configureIconButton(
             nextAgentChangeButton,
             symbol: "chevron.down",
             label: "Next AI change",
-            action: #selector(selectNextAgentChange)
+            target: self,
+            action: #selector(selectNextAgentChange),
+            controlSize: .small
         )
         configureAgentChangeButton(
             showOriginalButton,
@@ -304,23 +308,6 @@ final class TextEditorView: NSView, NSTabViewDelegate, NSTextViewDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    private func configureAgentChangeSymbolButton(
-        _ button: NSButton,
-        symbol: String,
-        label: String,
-        action: Selector
-    ) {
-        button.title = ""
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        button.imagePosition = .imageOnly
-        button.bezelStyle = .inline
-        button.controlSize = .small
-        button.target = self
-        button.action = action
-        button.toolTip = label
-        button.setAccessibilityLabel(label)
-    }
 
     private func configureAgentChangeButton(_ button: NSButton, label: String, action: Selector) {
         button.bezelStyle = .inline

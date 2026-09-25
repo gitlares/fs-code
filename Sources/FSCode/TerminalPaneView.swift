@@ -186,8 +186,8 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
 
-        configureButton(hideButton, symbol: "chevron.down", label: "Hide Terminal", action: #selector(hideTerminal))
-        configureButton(restartButton, symbol: "arrow.clockwise", label: "Restart Terminal", action: #selector(restartTerminal))
+        configureIconButton(hideButton, symbol: "chevron.down", label: "Hide Terminal", target: self, action: #selector(hideTerminal), pointSize: 12, isBordered: false)
+        configureIconButton(restartButton, symbol: "arrow.clockwise", label: "Restart Terminal", target: self, action: #selector(restartTerminal), pointSize: 12, isBordered: false)
         restartButton.isEnabled = false
 
         [header, terminal].forEach { addSubview($0) }
@@ -215,17 +215,6 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
             terminal.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             terminal.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8)
         ])
-    }
-
-    private func configureButton(_ button: NSButton, symbol: String, label: String, action: Selector) {
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        button.symbolConfiguration = .init(pointSize: 12, weight: .medium)
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.target = self
-        button.action = action
-        button.toolTip = label
-        button.setAccessibilityLabel(label)
     }
 
     @objc private func hideTerminal() {
@@ -269,22 +258,6 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
         terminal.selectedTextBackgroundColor = .selectedTextBackgroundColor
         terminal.selectedTextForegroundColor = palette.foreground
         terminal.installColors(ansi)
-    }
-
-    private static func ansiColors(dark: Bool) -> [NSColor] {
-        let values: [Int] = dark
-            ? [0x21222C, 0xFF5555, 0x50FA7B, 0xF1FA8C, 0xBD93F9, 0xFF79C6, 0x8BE9FD, 0xF8F8F2,
-               0x6272A4, 0xFF6E6E, 0x69FF94, 0xFFFFA5, 0xD6ACFF, 0xFF92DF, 0xA4FFFF, 0xFFFFFF]
-            : [0x1F1F1F, 0xB3261E, 0x14710A, 0x846E15, 0x644AC9, 0xA3144D, 0x036A96, 0xFFFBEB,
-               0x6C664B, 0xD34038, 0x258C1B, 0xA88916, 0x7958DC, 0xC33A70, 0x087FAF, 0xFFFFFF]
-        return values.map { value in
-            NSColor(
-                srgbRed: CGFloat((value >> 16) & 255) / 255,
-                green: CGFloat((value >> 8) & 255) / 255,
-                blue: CGFloat(value & 255) / 255,
-                alpha: 1
-            )
-        }
     }
 
     private static func terminalColor(_ color: NSColor) -> Color {

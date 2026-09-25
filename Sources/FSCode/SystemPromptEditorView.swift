@@ -21,6 +21,7 @@ final class SystemPromptEditorView: NSView, NSTextViewDelegate {
     picker.addItems(withTitles: ["Shared", "Build", "Plan", "Ask"])
     picker.target = self
     picker.action = #selector(sectionChanged)
+    picker.setAccessibilityLabel("Prompt section")
     editor.delegate = self
     editor.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
     editor.isRichText = false
@@ -38,8 +39,10 @@ final class SystemPromptEditorView: NSView, NSTextViewDelegate {
     scrollView.borderType = .bezelBorder
     saveButton.target = self
     saveButton.action = #selector(saveChanges)
+    saveButton.setAccessibilityLabel("Save system prompt")
     resetButton.target = self
     resetButton.action = #selector(resetSection)
+    resetButton.setAccessibilityLabel("Reset prompt section")
     let header = NSStackView(views: [picker, revisionLabel, NSView(), saveButton, resetButton])
     header.orientation = .horizontal
     header.spacing = 8
