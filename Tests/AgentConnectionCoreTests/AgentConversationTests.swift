@@ -598,13 +598,31 @@ final class AgentConversationTests: XCTestCase {
         ])
         XCTAssertEqual(manager.lastRequestInputContext?.inputTokens, 0)
         XCTAssertEqual(manager.lastRequestInputContext?.modelContextWindow, 128_000)
+        XCTAssertNil(manager.lastRequestInputContext?.cacheReadTokens)
+        XCTAssertNil(manager.lastRequestInputContext?.cacheWriteTokens)
+
+        transport.emit(method: "thread/tokenUsage/updated", params: [
+            "threadId": threadID,
+            "turnId": turnID,
+            "tokenUsage": ["last": ["inputTokens": 1, "cacheReadTokens": 0, "cacheWriteTokens": 0], "modelContextWindow": 128_000]
+        ])
+        XCTAssertEqual(manager.lastRequestInputContext?.cacheReadTokens, 0)
+        XCTAssertEqual(manager.lastRequestInputContext?.cacheWriteTokens, 0)
+
+        transport.emit(method: "thread/tokenUsage/updated", params: [
+            "threadId": threadID,
+            "turnId": turnID,
+            "tokenUsage": ["last": ["inputTokens": 2, "cacheReadTokens": 1]]
+        ])
+        XCTAssertNil(manager.lastRequestInputContext?.modelContextWindow)
+        XCTAssertEqual(manager.lastRequestInputContext?.cacheReadTokens, 1)
 
         transport.emit(method: "thread/tokenUsage/updated", params: [
             "threadId": threadID,
             "turnId": turnID,
             "tokenUsage": ["last": ["inputTokens": true], "modelContextWindow": 1]
         ])
-        XCTAssertEqual(manager.lastRequestInputContext?.inputTokens, 0)
+        XCTAssertEqual(manager.lastRequestInputContext?.inputTokens, 2)
         transport.emit(method: "thread/tokenUsage/updated", params: [
             "threadId": threadID,
             "turnId": turnID,
@@ -615,7 +633,7 @@ final class AgentConversationTests: XCTestCase {
             "turnId": turnID,
             "tokenUsage": ["last": ["inputTokens": 1], "modelContextWindow": 0]
         ])
-        XCTAssertEqual(manager.lastRequestInputContext?.inputTokens, 0)
+        XCTAssertEqual(manager.lastRequestInputContext?.inputTokens, 2)
 
         transport.emit(method: "turn/completed", params: [
             "threadId": threadID,
@@ -773,6 +791,12 @@ final class AgentConversationTests: XCTestCase {
         await manager.send()
         let threadID = try XCTUnwrap(transport.lastThreadID)
         let turnID = try XCTUnwrap(transport.lastTurnID)
+        transport.emit(method: "thread/tokenUsage/updated", params: [
+            "threadId": threadID,
+            "turnId": turnID,
+            "tokenUsage": ["last": ["inputTokens": 13, "cacheReadTokens": 7], "modelContextWindow": 128_000]
+        ])
+        XCTAssertEqual(manager.lastRequestInputContext?.cacheReadTokens, 7)
         transport.emit(method: "turn/completed", params: [
             "threadId": threadID,
             "turn": ["id": turnID, "status": "completed", "items": []]

@@ -243,8 +243,8 @@ private final class AssistantChatTab: NSView {
 
     private func updateColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = (isSelected ? NSColor.selectedControlColor.withAlphaComponent(0.16) : .clear).cgColor
-            titleButton.contentTintColor = .labelColor
+            layer?.backgroundColor = (isSelected ? NSColor.textBackgroundColor : .clear).cgColor
+            titleButton.contentTintColor = isSelected ? .labelColor : .secondaryLabelColor
             closeButton.contentTintColor = .secondaryLabelColor
         }
     }

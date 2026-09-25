@@ -116,7 +116,6 @@ import ProjectLibrary
         titleField.font = .systemFont(ofSize: 25, weight: .semibold)
         titleField.isBezeled = false
         titleField.drawsBackground = false
-        titleField.focusRingType = .none
         titleField.setAccessibilityLabel("Title")
         statusPopup.addItems(withTitles: ["Open", "Closed"])
         relevancePopup.addItems(withTitles: ["Low", "Normal", "High"])

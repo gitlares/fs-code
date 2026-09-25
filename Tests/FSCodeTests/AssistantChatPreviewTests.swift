@@ -20,7 +20,7 @@ final class AssistantChatPreviewTests: XCTestCase {
                 let project = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 defer { try? FileManager.default.removeItem(at: project) }
                 let profileID = UUID()
-                try writeFixture(project: project, profileID: profileID)
+                try writeFixture(project: project, profileID: profileID, checkpoint: true)
                 let conversation = AgentConversationManager(projectURL: project, transport: ChatPreviewTransport(profileID: profileID))
                 try await conversation.load()
                 conversation.updateDraft("Inspect the active workspace changes.")
@@ -114,14 +114,31 @@ final class AssistantChatPreviewTests: XCTestCase {
                     XCTAssertLessThanOrEqual(steer.convert(steer.bounds, to: panel).maxX, panel.bounds.width + 0.5)
                 }
                 try writeSnapshot(panel, to: output, named: "chat-\(Int(width))-\(appearance == .darkAqua ? "dark" : "light")-collapsed.png")
+                table.scrollRowToVisible(0)
+                try await Task.sleep(for: .milliseconds(80))
+                panel.layoutSubtreeIfNeeded()
                 let disclosure = try XCTUnwrap(descendants(panel, of: NSButton.self)
                     .first { $0.accessibilityLabel()?.hasPrefix("Turn activity:") == true })
                 disclosure.performClick(nil)
-                panel.layoutSubtreeIfNeeded()
-                table.layoutSubtreeIfNeeded()
+                for _ in 0..<8 {
+                    try await Task.sleep(for: .milliseconds(30))
+                    panel.layoutSubtreeIfNeeded()
+                    table.layoutSubtreeIfNeeded()
+                    if table.rect(ofRow: 0).height > collapsedHeight + 80 { break }
+                }
                 XCTAssertGreaterThan(table.rect(ofRow: 0).height, collapsedHeight + 80)
                 XCTAssertTrue(descendants(panel, of: NSTextView.self).contains { $0.string.contains("AssistantChatView.swift") })
                 try writeSnapshot(panel, to: output, named: "chat-\(Int(width))-\(appearance == .darkAqua ? "dark" : "light")-expanded.png")
+                if width == 340 {
+                    table.scrollRowToVisible(table.numberOfRows - 1)
+                    panel.layoutSubtreeIfNeeded()
+                    let taskDetails = try XCTUnwrap(descendants(panel, of: NSButton.self).first { $0.title == "Task details" })
+                    taskDetails.performClick(nil)
+                    try await Task.sleep(for: .milliseconds(80))
+                    panel.layoutSubtreeIfNeeded()
+                    XCTAssertTrue(descendants(panel, of: NSTextField.self).contains { $0.stringValue.contains("Resize the assistant pane") })
+                    try writeSnapshot(panel, to: output, named: "chat-checkpoint-340-\(appearance == .darkAqua ? "dark" : "light")-expanded.png")
+                }
                 steer.performClick(nil)
                 try await Task.sleep(for: .milliseconds(120))
                 XCTAssertEqual(conversation.queuedMessages.count, queueCountAfterReturn - 1)
@@ -286,11 +303,30 @@ final class AssistantChatPreviewTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(120))
         XCTAssertNil(conversation.liveProgressText)
         let final = try XCTUnwrap(descendants(panel, of: NSTextView.self).first { $0.string.contains("Final answer") })
-        XCTAssertEqual(final.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor, .textColor)
+        XCTAssertEqual(final.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor, .labelColor)
         let finalRow = table.numberOfRows - 1
         panel.layoutSubtreeIfNeeded()
         table.layoutSubtreeIfNeeded()
         XCTAssertTrue(table.visibleRect.intersects(table.rect(ofRow: finalRow)), "A streamed response stays followed after its asynchronous row measurement")
+        let stableHeight = table.rect(ofRow: finalRow).height
+        for index in 0..<3 {
+            transport.emit(method: "item/agentMessage/delta", params: [
+                "threadId": "preview-thread", "turnId": "preview-active-turn", "itemId": "final",
+                "delta": " Additional streamed detail \(index) keeps this response taller than the fallback estimate."
+            ])
+            var observedMinimum = CGFloat.greatestFiniteMagnitude
+            for _ in 0..<20 {
+                try await Task.sleep(for: .milliseconds(8))
+                panel.layoutSubtreeIfNeeded()
+                observedMinimum = min(observedMinimum, table.rect(ofRow: finalRow).height)
+            }
+            XCTAssertGreaterThanOrEqual(observedMinimum, stableHeight - 0.5, "Streaming must not collapse a measured row to the fallback height")
+            XCTAssertLessThanOrEqual(
+                max(0, table.rect(ofRow: finalRow).maxY - table.visibleRect.maxY),
+                1,
+                "Tail following remains stable during streamed deltas"
+            )
+        }
         var rowHeights: [CGFloat] = []
         var responseWidths: [CGFloat] = []
         for responseWidth: CGFloat in [340, 760, 340, 760, 340] {
@@ -317,6 +353,19 @@ final class AssistantChatPreviewTests: XCTestCase {
         XCTAssertGreaterThan(rowHeights[0], rowHeights[1])
         XCTAssertGreaterThan(rowHeights[2], rowHeights[3])
         XCTAssertGreaterThan(responseWidths[1], responseWidths[0])
+        table.scrollRowToVisible(0)
+        let readerRow = table.row(at: NSPoint(x: 4, y: table.visibleRect.minY + 2))
+        let readerOffset = table.visibleRect.minY - table.rect(ofRow: readerRow).minY
+        NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: try XCTUnwrap(table.enclosingScrollView))
+        transport.emit(method: "item/agentMessage/delta", params: [
+            "threadId": "preview-thread", "turnId": "preview-active-turn", "itemId": "final",
+            "delta": " This streamed update must not move a reader reviewing earlier messages."
+        ])
+        try await Task.sleep(for: .milliseconds(160))
+        panel.layoutSubtreeIfNeeded()
+        let anchoredRow = table.row(at: NSPoint(x: 4, y: table.visibleRect.minY + 2))
+        XCTAssertEqual(anchoredRow, readerRow)
+        XCTAssertEqual(table.visibleRect.minY - table.rect(ofRow: anchoredRow).minY, readerOffset, accuracy: 2)
         XCTAssertEqual(conversation.messages.last?.phase, .finalAnswer)
         XCTAssertEqual(conversation.messages.first(where: { $0.id == userID })?.role, .user)
         transport.emit(method: "turn/completed", params: [
@@ -377,7 +426,7 @@ final class AssistantChatPreviewTests: XCTestCase {
         XCTAssertEqual(table.visibleRect.minY - table.rect(ofRow: after).minY, beforeOffset, accuracy: 2)
     }
 
-    private func writeFixture(project: URL, profileID: UUID, longHistory: Bool = false) throws {
+    private func writeFixture(project: URL, profileID: UUID, longHistory: Bool = false, checkpoint: Bool = false) throws {
         let userID = UUID()
         let threadID = UUID()
         let now = Date()
@@ -385,7 +434,7 @@ final class AssistantChatPreviewTests: XCTestCase {
             ConversationMessage(id: userID, role: .user, text: "Inspect the editor layout and summarize the relevant changes.", createdAt: now.addingTimeInterval(-80)),
             ConversationMessage(role: .assistant, text: "The layout keeps the **editor central** and makes the assistant easier to scan. See https://example.com/very/long/path/that/wraps/in/a/narrow/transcript and `Sources/FSCode/AssistantChatView.swift`.\n\n- Controls stay beside the composer.\n- Runtime work is attached to the request.\n- Context reflects the latest request.", createdAt: now.addingTimeInterval(-60), phase: .finalAnswer),
             ConversationMessage(role: .user, text: "Keep the activity readable at the minimum assistant width.", createdAt: now.addingTimeInterval(-40)),
-            ConversationMessage(role: .assistant, text: "Done. Commands and output remain selectable in a bounded scrolling region.", createdAt: now.addingTimeInterval(-20))
+            ConversationMessage(role: .assistant, text: checkpoint ? "Done. Commands and output remain selectable in a bounded scrolling region.\n\n## Checkpoint\n\n- Objective: Keep task status structured\n- Plan: Render details below the response\n- Changes made: Added the disclosure\n- Verified: Preview fixture\n- Not verified: Live account review\n- Discarded hypotheses: None\n- Next action: Resize the assistant pane and review the result" : "Done. Commands and output remain selectable in a bounded scrolling region.", createdAt: now.addingTimeInterval(-20), phase: checkpoint ? .finalAnswer : nil)
         ]
         if longHistory {
             for index in 0..<30 {

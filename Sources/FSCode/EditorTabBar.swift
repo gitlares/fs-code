@@ -20,6 +20,8 @@ final class EditorTabBar: NSView {
     private let scrollView = NSScrollView()
     private let stripView = StripView()
     private let separator = NSView()
+    private let material = NSVisualEffectView()
+    private var accessibilityObserver: NSObjectProtocol?
     private var tabViews: [URL: TabView] = [:]
     private var orderedURLs: [URL] = []
     private var selectedURL: URL?
@@ -27,6 +29,10 @@ final class EditorTabBar: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        material.material = .headerView
+        material.blendingMode = .withinWindow
+        material.state = .followsWindowActiveState
+        addSubview(material)
 
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
@@ -39,12 +45,23 @@ final class EditorTabBar: NSView {
         separator.wantsLayer = true
         separator.layer?.backgroundColor = NSColor.separatorColor.cgColor
         addSubview(separator)
+        accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: NSWorkspace.shared,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshAccessibilityColors() }
+        }
 
         setAccessibilityRole(.tabGroup)
         setAccessibilityLabel("Open files")
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    isolated deinit {
+        if let accessibilityObserver { NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver) }
+    }
 
     override var isFlipped: Bool { true }
 
@@ -55,8 +72,16 @@ final class EditorTabBar: NSView {
         }
     }
 
+    private func refreshAccessibilityColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            separator.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        }
+        tabViews.values.forEach { $0.updateAccessibilityColors() }
+    }
+
     override func layout() {
         super.layout()
+        material.frame = bounds
         let separatorHeight = 1 / max(window?.backingScaleFactor ?? 1, 1)
         scrollView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - separatorHeight))
         separator.frame = NSRect(x: 0, y: bounds.height - separatorHeight, width: bounds.width, height: separatorHeight)
@@ -150,13 +175,14 @@ private final class TabView: NSView {
 
     private(set) var preferredWidth: CGFloat = 110
     private var selected = false
+    private var hovering = false
+    private var dirty = false
+    private var trackingAreaToken: NSTrackingArea?
 
     init(url: URL) {
         self.url = url
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 5
-        layer?.cornerCurve = .continuous
 
         titleButton.bezelStyle = .inline
         titleButton.isBordered = false
@@ -173,14 +199,14 @@ private final class TabView: NSView {
         addSubview(titleButton)
 
         agentChangeIndicator.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Modified by approved agent change")
-        agentChangeIndicator.contentTintColor = .systemPurple
+        agentChangeIndicator.contentTintColor = .controlAccentColor
         agentChangeIndicator.setAccessibilityLabel("Modified by approved agent change")
         agentChangeIndicator.toolTip = "Modified by an approved agent change"
         agentChangeIndicator.setAccessibilityElement(true)
         addSubview(agentChangeIndicator)
 
         dirtyIndicator.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Unsaved changes")
-        dirtyIndicator.contentTintColor = .controlAccentColor
+        dirtyIndicator.contentTintColor = .secondaryLabelColor
         dirtyIndicator.setAccessibilityLabel("Unsaved changes")
         dirtyIndicator.toolTip = "Unsaved changes"
         dirtyIndicator.setAccessibilityElement(true)
@@ -202,6 +228,17 @@ private final class TabView: NSView {
 
     override var isFlipped: Bool { true }
 
+    override func updateTrackingAreas() {
+        if let trackingAreaToken { removeTrackingArea(trackingAreaToken) }
+        let area = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingAreaToken = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; updateAffordances() }
+    override func mouseExited(with event: NSEvent) { hovering = false; updateAffordances() }
+
     override func layout() {
         super.layout()
         let closeSize: CGFloat = 22
@@ -210,13 +247,13 @@ private final class TabView: NSView {
         let closeX = bounds.width - closeSize - 3
         closeButton.frame = NSRect(x: closeX, y: (bounds.height - closeSize) / 2, width: closeSize, height: closeSize)
         dirtyIndicator.frame = NSRect(
-            x: closeX - dirtySize - 3,
+            x: closeButton.frame.midX - dirtySize / 2,
             y: (bounds.height - dirtySize) / 2,
             width: dirtySize,
             height: dirtySize
         )
         agentChangeIndicator.frame = NSRect(
-            x: dirtyIndicator.frame.minX - agentSize - 4,
+            x: closeButton.frame.minX - agentSize - 4,
             y: (bounds.height - agentSize) / 2,
             width: agentSize,
             height: agentSize
@@ -239,7 +276,7 @@ private final class TabView: NSView {
         setAccessibilityLabel(title)
         setAccessibilityHelp(item.url.path)
         setAccessibilitySelected(selected)
-        dirtyIndicator.isHidden = !item.isDirty
+        dirty = item.isDirty
         agentChangeIndicator.isHidden = !item.isAgentModified
 
         let titleWidth = (title as NSString).size(withAttributes: [.font: titleButton.font ?? .systemFont(ofSize: 12)]).width
@@ -247,6 +284,7 @@ private final class TabView: NSView {
         preferredWidth = min(200, max(110, ceil(titleWidth) + 80))
         self.selected = selected
         updateColors()
+        updateAffordances()
         needsLayout = true
     }
 
@@ -255,10 +293,18 @@ private final class TabView: NSView {
         updateColors()
     }
 
+    func updateAccessibilityColors() { updateColors() }
+
     private func updateColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = (selected ? NSColor.controlBackgroundColor : .clear).cgColor
+            layer?.backgroundColor = (selected ? EditorPalette(appearance: effectiveAppearance).background : .clear).cgColor
+            titleButton.contentTintColor = selected ? .labelColor : .secondaryLabelColor
         }
+    }
+
+    private func updateAffordances() {
+        closeButton.isHidden = !hovering
+        dirtyIndicator.isHidden = !dirty || hovering
     }
 
     @objc private func selectTab() { onSelect?(url) }

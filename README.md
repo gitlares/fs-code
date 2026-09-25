@@ -4,7 +4,7 @@
 
 FS Code is an early, MIT-licensed editor built with Swift and AppKit. No Electron, no Monaco, and no VS Code dependency. Created by Daniel Lares with Codex.
 
-**0.1.0 Alpha** · macOS 15+ · English interface
+**0.1.1 Alpha** · macOS 15+ · English interface
 
 This is a working prototype, not a finished IDE. Expect rough edges and keep your projects backed up. Performance is a design priority; we do not yet claim benchmark superiority over other editors.
 
@@ -15,7 +15,7 @@ I like VS Code, Cursor, and Zed. FS Code starts from what I want to do different
 1. **Stay native and lightweight.** Opening several projects should not require several heavyweight application runtimes. I prefer native macOS components wherever they fit.
 2. **Keep a real editor beside the agent.** AI-assisted development still involves reading code, checking decisions, and making manual edits. I want a focused editor, not an entire IDE that gets in the way.
 3. **Make instructions visible.** System prompts and project guardrails should be inspectable and editable. I want to understand which rules apply to a file and what context a request receives.
-4. **Make efficient tools part of the workflow.** RTK (Rust Token Killer) belongs in the workflow I want to build. Its automatic integration is on the roadmap, not implemented in this alpha.
+4. **Make efficient tools part of the workflow.** RTK (Rust Token Killer) belongs in the workflow I want to build. Compatible agent commands now use RTK when it is available locally.
 5. **Show what the agent changed.** File and block changes should be visible in the editor and associated with the conversation, without requiring a trip through Git just to discover them.
 6. **Make undoing AI changes straightforward.** Review the previous content and restore changes, with safeguards for subsequent edits.
 7. **Keep AI accounts scoped to projects.** Different projects can use different accounts from the same service.
@@ -39,7 +39,7 @@ The native agent currently exposes bounded project tools. It is not a full auton
 
 ## Download and run
 
-Download [FS Code 0.1.0 Alpha for Apple Silicon](https://github.com/gitlares/fs-code/releases/download/v0.1.0-alpha.1/FS-Code-0.1.0-arm64.zip), extract **FS Code.app**, and move it to Applications. This macOS 15+ build is Developer ID signed and notarized by Apple. See the [release notes and checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.0-alpha.1).
+Download [FS Code 0.1.1 Alpha for Apple Silicon](https://github.com/gitlares/fs-code/releases/download/v0.1.1-alpha.1/FS-Code-0.1.1-arm64.zip), extract **FS Code.app**, and move it to Applications. This macOS 15+ build is Developer ID signed and notarized by Apple. See the [release notes and checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.1-alpha.1).
 
 AI features require your own supported account or API key. Opening a project and using the editor do not require an FS Code account.
 
@@ -69,19 +69,19 @@ FS Code contains no product analytics or crash-reporting service. Activity recor
 - The project library lives under `~/Library/Application Support/FS Code/`.
 - Project instructions and plans use `.fs/`; conversation and other local project state may use `.fscode/`.
 - Connection credentials are stored through macOS Keychain. Do not commit local project state or credential exports to a public repository.
-- Sparkle is included, but automatic update checks are disabled. A build needs a configured feed and update-signing key before update checks are available.
+- Sparkle uses a public signed-update feed. Use **FS Code → Check for Updates…**; automatic checks and installation remain disabled by default. Version 0.1.0 requires one manual upgrade because it shipped without a feed.
 
 See [Privacy](docs/PRIVACY.md) for the scope of these statements.
 
 ## What is next
 
-- RTK integration and measured token savings.
+- Broader RTK command coverage and measured token savings.
 - Project-scoped MCP connections.
 - Additional model providers, with supported authentication paths.
 - Native Git status, history, and graph.
-- Agent command execution and subagents with explicit controls.
+- Broader agent tool coverage and subagents with explicit controls.
 - A lightweight extension model, language services, and larger-file performance work.
-- A published Sparkle update feed and end-to-end update validation.
+- End-to-end upgrade validation across published versions.
 
 These are planned capabilities, not features promised by this release.
 
@@ -105,11 +105,11 @@ FS Code builds on the work of these open-source projects:
 | --- | --- |
 | [AgentRunKit](https://github.com/Tom-Ryder/AgentRunKit) | Native Swift agent runtime behind our `AgentEngine` interface. |
 | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | Terminal emulation for the integrated local terminal. |
-| [Sparkle](https://github.com/sparkle-project/Sparkle) | macOS update framework; the public update feed is not enabled in this alpha. |
+| [Sparkle](https://github.com/sparkle-project/Sparkle) | macOS update framework with a public signed-update feed. |
 | [Dracula / Alucard](https://github.com/dracula/dracula-theme) | Dark and light color palettes. |
 
 We appreciate their maintainers and contributors. As the editor matures, we hope to contribute generally useful fixes and improvements upstream while keeping FS Code-specific behavior in the editor.
 
 Full notices ship in [ThirdPartyNotices.txt](Resources/ThirdPartyNotices.txt). Our vendored AgentRunKit version and local changes are documented in [UPSTREAM.md](Vendor/AgentRunKit/UPSTREAM.md).
 
-[RTK — Rust Token Killer](https://github.com/rtk-ai/rtk) is also part of our planned workflow. It is not yet integrated into the released application.
+[RTK — Rust Token Killer](https://github.com/rtk-ai/rtk) is used for compatible agent commands when installed locally.

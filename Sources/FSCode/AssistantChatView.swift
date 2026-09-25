@@ -48,6 +48,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var renderedSelectedEffort: ConversationReasoningEffort?
     private var expandedActivityMessageIDs: Set<UUID> = []
     private var expandedTurnFileIDs: Set<String> = []
+    private var expandedCheckpointMessageIDs: Set<UUID> = []
     private var usesCompactFooterLayout: Bool?
     private var accountSelectorTitle = "Connect Model"
     private var contextSelectorTitle = "Context —"
@@ -78,6 +79,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private let queueScrollView = NSScrollView()
     private let queueStack = NSStackView()
     private let queueStatus = NSTextField(wrappingLabelWithString: "")
+    private let queueErrorIcon = NSImageView()
     private let resumeQueueButton = NSButton(title: "Resume", target: nil, action: nil)
     private let attachmentStack = NSStackView()
     private let newChatButton = NSButton(title: "New Chat", target: nil, action: nil)
@@ -86,6 +88,9 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private let sendButton = NSButton(title: "Send", target: nil, action: nil)
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let statusIcon = NSImageView()
+    private let streamingIndicator = NSProgressIndicator()
+    private let statusRow = NSStackView()
     private let composerContainer = NSView()
     private let footerControls = NSStackView()
     private let connectionRow = NSStackView()
@@ -355,7 +360,13 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         resumeQueueButton.target = self
         resumeQueueButton.action = #selector(resumeQueue)
         resumeQueueButton.setAccessibilityLabel("Resume queued messages")
-        let queueHeader = NSStackView(views: [queueStatus, NSView(), resumeQueueButton])
+        queueErrorIcon.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Queue error")
+        queueErrorIcon.contentTintColor = .systemRed
+        queueErrorIcon.imageScaling = .scaleProportionallyDown
+        queueErrorIcon.isHidden = true
+        queueErrorIcon.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        queueErrorIcon.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        let queueHeader = NSStackView(views: [queueErrorIcon, queueStatus, NSView(), resumeQueueButton])
         queueHeader.orientation = .horizontal
         queueHeader.alignment = .centerY
         queueHeader.spacing = 5
@@ -429,7 +440,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         composerContainer.wantsLayer = true
         composerContainer.layer?.cornerRadius = 12
         composerContainer.layer?.cornerCurve = .continuous
-        composerContainer.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        composerContainer.layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
         composerContainer.layer?.borderWidth = 1
         composerContainer.layer?.borderColor = NSColor.separatorColor.cgColor
         composerContainer.addSubview(attachmentStack)
@@ -452,8 +463,22 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             footerControls.bottomAnchor.constraint(equalTo: composerContainer.bottomAnchor, constant: -8)
         ])
 
+        statusIcon.translatesAutoresizingMaskIntoConstraints = false
+        statusIcon.imageScaling = .scaleProportionallyDown
+        statusIcon.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        statusIcon.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        streamingIndicator.style = .spinning
+        streamingIndicator.controlSize = .small
+        streamingIndicator.isDisplayedWhenStopped = false
+        statusRow.orientation = .horizontal
+        statusRow.alignment = .firstBaseline
+        statusRow.spacing = 5
+        statusRow.addArrangedSubview(statusIcon)
+        statusRow.addArrangedSubview(streamingIndicator)
+        statusRow.addArrangedSubview(statusLabel)
+
         let content = NSStackView(views: [
-            chatHeader, statusLabel,
+            chatHeader, statusRow,
             transcriptScrollView, queueContainer, composerContainer
         ])
         content.orientation = .vertical
@@ -462,7 +487,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
 
-        for view in [chatHeader, statusLabel, transcriptScrollView, queueContainer, composerContainer] {
+        for view in [chatHeader, statusRow, transcriptScrollView, queueContainer, composerContainer] {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
@@ -500,8 +525,8 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     }
 
     private func updateInlineSelectorPresentation(compact: Bool) {
-        if let usage = manager.lastRequestInputContext {
-            let percent = Int(min(100, max(0, (usage.utilization * 100).rounded())))
+        if let usage = manager.lastRequestInputContext, let utilization = usage.utilization {
+            let percent = Int(min(100, max(0, (utilization * 100).rounded())))
             contextSelectorTitle = compact ? "\(percent)%" : "Context \(percent)%"
         } else {
             contextSelectorTitle = compact ? "—" : "Context —"
@@ -589,12 +614,17 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         accountSelectorTitle = selectedProfile?.name ?? connectedAccountName ?? "Connect Model"
         accountButton.toolTip = accountSelectorTitle
         accountButton.isEnabled = !isBusy
-        if let usage = manager.lastRequestInputContext {
-            let percent = Int(min(100, max(0, (usage.utilization * 100).rounded())))
+        if let usage = manager.lastRequestInputContext, let utilization = usage.utilization {
+            let percent = Int(min(100, max(0, (utilization * 100).rounded())))
             contextSelectorTitle = usesCompactFooterLayout == true ? "\(percent)%" : "Context \(percent)%"
-            contextButton.image = contextIcon(utilization: usage.utilization)
-            contextButton.toolTip = "Last request input context: \(usage.inputTokens) of \(usage.modelContextWindow) tokens"
+            contextButton.image = contextIcon(utilization: utilization)
+            contextButton.toolTip = "Last request input context: \(usage.inputTokens) of \(usage.modelContextWindow ?? 0) tokens"
             contextButton.setAccessibilityValue("\(percent)%")
+        } else if let usage = manager.lastRequestInputContext {
+            contextSelectorTitle = usesCompactFooterLayout == true ? "—" : "Context —"
+            contextButton.image = contextIcon(utilization: nil)
+            contextButton.toolTip = "Last request input: \(usage.inputTokens) tokens; provider window not reported"
+            contextButton.setAccessibilityValue("Window not reported")
         } else {
             contextSelectorTitle = usesCompactFooterLayout == true ? "—" : "Context —"
             contextButton.image = contextIcon(utilization: nil)
@@ -624,16 +654,33 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         configureQueue()
         let hidesIdleStatus = localRecoveryMessage == nil &&
             (manager.activity == .idle || manager.liveProgressText?.isEmpty == false)
-        statusLabel.isHidden = hidesIdleStatus
+        statusRow.isHidden = hidesIdleStatus
         if !hidesIdleStatus {
             statusLabel.stringValue = localRecoveryMessage ?? manager.activity.statusText
-            statusLabel.textColor = statusColor
+            let isError: Bool
+            if localRecoveryMessage != nil {
+                isError = true
+            } else if case .failed = manager.activity {
+                isError = true
+            } else {
+                isError = false
+            }
+            let isStreaming: Bool
+            switch manager.activity {
+            case .starting, .responding, .stopping: isStreaming = !isError
+            case .idle, .failed: isStreaming = false
+            }
+            statusIcon.image = isError
+                ? NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Error")
+                : nil
+            statusIcon.contentTintColor = .systemRed
+            statusIcon.isHidden = !isError
+            statusLabel.textColor = .labelColor
+            if isStreaming { streamingIndicator.startAnimation(nil) }
+            else { streamingIndicator.stopAnimation(nil) }
         }
         refreshTranscript()
         revealPendingSubmissionIfNeeded()
-        if shouldScrollToEnd, transcriptTable.numberOfRows > 0 {
-            scrollTranscriptToRow(transcriptTable.numberOfRows - 1)
-        }
     }
 
     private func ensureInitialChatIfNeeded() {
@@ -853,13 +900,16 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
 
         if let error = manager.queueError, !error.isEmpty {
             queueStatus.stringValue = error
-            queueStatus.textColor = .systemRed
+            queueStatus.textColor = .labelColor
+            queueErrorIcon.isHidden = false
         } else if manager.queueIsPaused {
             queueStatus.stringValue = queued.isEmpty ? "Queue paused" : "Queued messages paused"
             queueStatus.textColor = .secondaryLabelColor
+            queueErrorIcon.isHidden = true
         } else {
             queueStatus.stringValue = queued.count == 1 ? "1 queued message" : "\(queued.count) queued messages"
             queueStatus.textColor = .secondaryLabelColor
+            queueErrorIcon.isHidden = true
         }
         resumeQueueButton.isHidden = !manager.queueIsPaused
         resumeQueueButton.isEnabled = manager.queueIsPaused && isConnected
@@ -1122,6 +1172,10 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             item.target = self
             item.representedObject = model.id
             item.state = model.id == manager.selectedModelID ? .on : .off
+            if let current = model.defaultContextWindow {
+                let maximum = model.maximumContextWindow.map { "; provider maximum \($0) tokens" } ?? ""
+                item.toolTip = "Provider default context: \(current) tokens\(maximum)."
+            }
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: modelButton.bounds.height), in: modelButton)
     }
@@ -1225,10 +1279,16 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         let menu = NSMenu()
         if let usage = manager.lastRequestInputContext {
             menu.addItem(
-                withTitle: "Last request input context: \(usage.inputTokens) of \(usage.modelContextWindow) tokens",
+                withTitle: usage.modelContextWindow.map { "Last request input context: \(usage.inputTokens) of \($0) tokens" } ?? "Last request input: \(usage.inputTokens) tokens; provider window not reported",
                 action: nil,
                 keyEquivalent: ""
             )
+            if let cached = usage.cacheReadTokens {
+                menu.addItem(withTitle: "Cache read: \(cached) tokens", action: nil, keyEquivalent: "")
+            }
+            if let cached = usage.cacheWriteTokens {
+                menu.addItem(withTitle: "Cache write: \(cached) tokens", action: nil, keyEquivalent: "")
+            }
         } else {
             menu.addItem(withTitle: "Last request input context is not reported", action: nil, keyEquivalent: "")
         }
@@ -1412,6 +1472,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     }
 
     private func refreshTranscript() {
+        let viewportAnchor = transcriptViewportAnchor()
         let messages = manager.messages
         let activities = manager.turnActivitySummaries
         let liveProgressText = manager.liveProgressText
@@ -1442,11 +1503,12 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         renderedActivities = activities
         renderedLiveProgressText = liveProgressText
         renderedLiveProgressUserMessageID = liveProgressUserMessageID
-        if sameCount {
-            for row in changedRows { transcriptRowHeights.removeValue(forKey: row); rowMeasurementScheduled.remove(row) }
-        } else {
-            transcriptRowHeights.removeAll()
-            rowMeasurementScheduled.removeAll()
+        transcriptLayoutGeneration &+= 1
+        rowMeasurementScheduled.removeAll()
+        let sharedPrefix = zip(messages, previousMessages).prefix { $0.0.id == $0.1.id }.count
+        if sharedPrefix != messages.count || messages.count != previousMessages.count {
+            transcriptRowHeights = transcriptRowHeights.filter { $0.key < sharedPrefix }
+            rowMeasurementScheduled = rowMeasurementScheduled.filter { $0 < sharedPrefix }
         }
         if sameCount, !changedRows.isEmpty {
             let indexes = IndexSet(changedRows)
@@ -1458,6 +1520,8 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         } else {
             transcriptTable.reloadData()
         }
+        transcriptTable.layoutSubtreeIfNeeded()
+        restoreTranscriptViewport(viewportAnchor)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -1482,6 +1546,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             rowStack.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: isUser ? -7 : -8)
         ])
 
+        let checkpoint = !isUser && message.phase == .finalAnswer ? AssistantCheckpoint.extract(from: message.text) : nil
         let body: NSView
         if isUser {
             let label = NSTextField(wrappingLabelWithString: visibleMessageText(message.text))
@@ -1491,7 +1556,8 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             label.font = .systemFont(ofSize: 14)
             body = label
         } else {
-            let rendered = renderedAssistantMarkdown(for: message) ?? NSAttributedString(string: message.text)
+            let displayText = checkpoint?.body ?? message.text
+            let rendered = renderedAssistantMarkdown(for: message, source: displayText) ?? NSAttributedString(string: displayText)
             body = AssistantResponseTextView(
                 rendered: attributedResponse(rendered, source: message.text),
                 initialWidth: max(100, (tableColumn?.width ?? tableView.bounds.width) - 12),
@@ -1518,6 +1584,16 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         } else {
             rowStack.addArrangedSubview(body)
             body.widthAnchor.constraint(equalTo: rowStack.widthAnchor, constant: -4).isActive = true
+            if let checkpoint {
+                let details = CheckpointDisclosureView(checkpoint: checkpoint, isExpanded: expandedCheckpointMessageIDs.contains(message.id)) { [weak self, weak cell] expanded in
+                    guard let self, let cell else { return }
+                    if expanded { self.expandedCheckpointMessageIDs.insert(message.id) }
+                    else { self.expandedCheckpointMessageIDs.remove(message.id) }
+                    self.scheduleRowMeasurement(cell, row: row)
+                }
+                rowStack.addArrangedSubview(details)
+                details.widthAnchor.constraint(equalTo: rowStack.widthAnchor, constant: -4).isActive = true
+            }
         }
         if row == renderedMessages.count - 1,
            let progress = renderedLiveProgressText,
@@ -1803,25 +1879,30 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         else { restore(alert.runModal()) }
     }
 
-    private func renderedAssistantMarkdown(for message: ConversationMessage) -> NSAttributedString? {
-        let fenceCount = message.text.components(separatedBy: "```").count - 1
+    private func renderedAssistantMarkdown(for message: ConversationMessage, source override: String? = nil) -> NSAttributedString? {
+        let sourceText = override ?? message.text
+        let fenceCount = sourceText.components(separatedBy: "```").count - 1
         guard message.role == .assistant,
-              message.text.utf8.count <= 1_048_576,
+              sourceText.utf8.count <= 1_048_576,
               fenceCount.isMultiple(of: 2) else {
             return nil
         }
         if let cached = renderedAssistantMessages[message.id],
-           cached.source == message.text,
+           cached.source == sourceText,
            cached.phase == message.phase {
             return cached.rendered
         }
-        guard let source = MarkdownPreviewView.renderedMarkdown(message.text, presentation: .assistant) else { return nil }
+        guard let source = MarkdownPreviewView.renderedMarkdown(sourceText, presentation: .assistant) else { return nil }
         let rendered = NSMutableAttributedString(attributedString: source)
         let range = NSRange(location: 0, length: rendered.length)
         rendered.enumerateAttribute(.font, in: range) { value, fontRange, _ in
             guard let font = value as? NSFont,
                   abs(font.pointSize - NSFont.systemFontSize) < 0.1 else { return }
-            rendered.addAttribute(.font, value: NSFont(descriptor: font.fontDescriptor, size: 14) ?? font, range: fontRange)
+            rendered.addAttribute(
+                .font,
+                value: NSFont(descriptor: font.fontDescriptor, size: NSFont.systemFontSize) ?? font,
+                range: fontRange
+            )
         }
         if message.phase == .commentary {
             rendered.enumerateAttribute(.foregroundColor, in: range) { value, colorRange, _ in
@@ -1829,7 +1910,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
                 rendered.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: colorRange)
             }
         }
-        renderedAssistantMessages[message.id] = (source: message.text, phase: message.phase, rendered: rendered)
+        renderedAssistantMessages[message.id] = (source: sourceText, phase: message.phase, rendered: rendered)
         return rendered
     }
 
@@ -1845,10 +1926,10 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
 
     private func updateSurfaceColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
             transcriptTable.backgroundColor = .clear
             transcriptScrollView.backgroundColor = .clear
-            composerContainer.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+            composerContainer.layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
             composerContainer.layer?.borderColor = NSColor.separatorColor.cgColor
         }
     }
@@ -1967,7 +2048,7 @@ private final class TurnActivityDisclosureView: NSView {
             text.textStorage?.setAttributedString(MarkdownPreviewView.renderedToolText(bounded))
             text.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
             text.textColor = .labelColor
-            text.backgroundColor = .controlBackgroundColor
+            text.backgroundColor = .textBackgroundColor
             text.isEditable = false
             text.isSelectable = true
             text.isVerticallyResizable = true
@@ -1982,10 +2063,8 @@ private final class TurnActivityDisclosureView: NSView {
             scroll.scrollerStyle = .overlay
             scroll.autohidesScrollers = true
             scroll.drawsBackground = true
-            scroll.backgroundColor = .controlBackgroundColor
-            scroll.borderType = .noBorder
-            scroll.wantsLayer = true
-            scroll.layer?.cornerRadius = 5
+            scroll.backgroundColor = .textBackgroundColor
+            scroll.borderType = .lineBorder
             scroll.heightAnchor.constraint(equalToConstant: min(132, max(48, CGFloat(bounded.split(separator: "\n").count * 14 + 16)))).isActive = true
             content.addArrangedSubview(scroll)
             scroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
@@ -2027,14 +2106,60 @@ private final class UserMessageSurface: NSView {
 
     private func updateColor() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
-            layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.18).cgColor
+            layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
+            layer?.borderColor = NSColor.separatorColor.cgColor
             layer?.borderWidth = 0.5
         }
     }
 }
 
 @MainActor
+private final class CheckpointDisclosureView: NSView {
+    private let toggle = NSButton(title: "Task details", target: nil, action: nil)
+    private let details = NSStackView()
+    private let changed: (Bool) -> Void
+
+    init(checkpoint: AssistantCheckpoint, isExpanded: Bool, changed: @escaping (Bool) -> Void) {
+        self.changed = changed
+        super.init(frame: .zero)
+        toggle.bezelStyle = .inline
+        toggle.isBordered = false
+        toggle.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Show task details")
+        toggle.imagePosition = .imageLeading
+        toggle.target = self
+        toggle.action = #selector(toggleDetails)
+        details.orientation = .vertical
+        details.alignment = .leading
+        details.spacing = 4
+        let nextAction = checkpoint.meaningfulNextAction ?? ""
+        for field in checkpoint.fields {
+            let label = NSTextField(wrappingLabelWithString: "\(field.label): \(field.value)")
+            label.font = .systemFont(ofSize: 12)
+            label.textColor = .secondaryLabelColor
+            label.maximumNumberOfLines = 0
+            details.addArrangedSubview(label)
+            label.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
+        }
+        details.isHidden = !isExpanded
+        toggle.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        let next = NSTextField(wrappingLabelWithString: nextAction.isEmpty ? "" : "Next: \(nextAction)")
+        next.font = .systemFont(ofSize: 12, weight: .medium)
+        next.textColor = .secondaryLabelColor
+        next.maximumNumberOfLines = 0
+        next.isHidden = nextAction.isEmpty
+        let stack = NSStackView(views: [toggle, next, details])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor)])
+        details.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        next.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    @objc private func toggleDetails() { details.isHidden.toggle(); toggle.image = NSImage(systemSymbolName: details.isHidden ? "chevron.right" : "chevron.down", accessibilityDescription: nil); changed(!details.isHidden) }
+}
+
 private final class CopyMessageButton: NSButton {
     let messageText: String
 
@@ -2180,6 +2305,7 @@ private final class TurnFilesDisclosureView: NSView {
         let restore = NSButton(title: "Restore Point", target: nil, action: nil)
         restore.bezelStyle = .inline
         restore.controlSize = .small
+        restore.hasDestructiveAction = true
         let restoreTarget = BlockTarget { onRestore() }
         actionTargets.append(restoreTarget)
         restore.target = restoreTarget

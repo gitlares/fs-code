@@ -70,6 +70,11 @@ import AgentConnectionCore
     private let projectSidebar: ProjectSidebarView
     private let connectionManager: AgentConnectionManager
     private let assistantConnectionView: AssistantConnectionView
+    private let permissionsView: PermissionsView
+    private let capabilityStore: ProjectCapabilityStore
+    private let computerUseService = NativeComputerUseService()
+    private var capabilityApprovalContinuation: CheckedContinuation<Bool, Never>?
+    private weak var capabilityApprovalSheet: NSWindow?
     private var agentModifiedURLs = Set<URL>()
     private var displayedAgentChangeRecords: [AgentFileChangeRecord] = []
     private let launchesTerminal: Bool
@@ -109,17 +114,21 @@ import AgentConnectionCore
         agentContextView.configureSystemPrompts(projectURL: url)
         let planEditorView = PlanEditorView(projectURL: url)
         self.planEditorView = planEditorView
+        let permissionsView = PermissionsView(projectURL: url)
+        self.permissionsView = permissionsView
+        self.capabilityStore = ProjectCapabilityStore(projectURL: url)
 
         let sidebar = NSViewController()
         let projectSidebar = ProjectSidebarView(
             outline: outline,
             projectURL: url,
             agentContextSidebar: agentContextView.sidebarView,
-            plansSidebar: planEditorView.sidebarView
+            plansSidebar: planEditorView.sidebarView,
+            permissionsSidebar: permissionsView
         )
         self.projectSidebar = projectSidebar
         sidebar.view = projectSidebar
-        let sidebarItem = NSSplitViewItem(viewController: sidebar)
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         self.sidebarItem = sidebarItem
 
         let editor = NSViewController()
@@ -143,12 +152,15 @@ import AgentConnectionCore
         projectSidebar.onViewChanged = { mode in
             // A hidden editor must not continue receiving typing or Undo commands.
             fileView.window?.makeFirstResponder(nil)
-            fileView.isHidden = mode != .files
+            fileView.isHidden = mode != .files && mode != .permissions
             todoView.isHidden = mode != .todos
             planEditorView.isHidden = mode != .plans
             agentContextView.isHidden = mode != .agentContext
             if mode == .plans {
                 planEditorView.reload()
+            }
+            if mode == .permissions {
+                permissionsView.refresh()
             }
             if mode == .files {
                 fileView.focusEditor()
@@ -169,17 +181,42 @@ import AgentConnectionCore
         editorSplit.splitView.dividerStyle = .thin
         editorSplit.addSplitViewItem(editorItem)
         editorSplit.addSplitViewItem(terminalItem)
-        let centerItem = NSSplitViewItem(viewController: editorSplit)
+        let center = NSViewController()
+        let centerContainer = NSView()
+        center.view = centerContainer
+        center.addChild(editorSplit)
+        editorSplit.view.translatesAutoresizingMaskIntoConstraints = false
+        centerContainer.addSubview(editorSplit.view)
+        NSLayoutConstraint.activate([
+            editorSplit.view.leadingAnchor.constraint(equalTo: centerContainer.leadingAnchor),
+            editorSplit.view.trailingAnchor.constraint(equalTo: centerContainer.trailingAnchor),
+            editorSplit.view.topAnchor.constraint(equalTo: centerContainer.safeAreaLayoutGuide.topAnchor),
+            editorSplit.view.bottomAnchor.constraint(equalTo: centerContainer.bottomAnchor)
+        ])
+        let centerItem = NSSplitViewItem(viewController: center)
         self.centerItem = centerItem
 
         let assistant = NSViewController()
         let assistantConnectionView = AssistantConnectionView(manager: connectionManager, projectURL: url)
         self.assistantConnectionView = assistantConnectionView
         assistant.view = assistantConnectionView
-        let assistantItem = NSSplitViewItem(viewController: assistant)
+        let assistantItem = NSSplitViewItem(inspectorWithViewController: assistant)
         self.assistantItem = assistantItem
 
         super.init()
+        assistantConnectionView.configureHostToolHandlers(
+            requestCapability: { [weak self] request in
+                guard let self else { return .rejected("The workspace is no longer available.") }
+                return await self.requestProjectCapability(request)
+            },
+            computerUse: { [weak self] request in
+                guard let self else { return .rejected("The workspace is no longer available.") }
+                guard await self.capabilityStore.isEnabled(.computerUse) else {
+                    return .rejected("Computer Use is disabled for this project.")
+                }
+                return await self.computerUseService.handle(request)
+            }
+        )
         assistantConnectionView.configureFileMutationHandlers(
             authorize: { [weak self] relativePath, operation in
                 await self?.authorizeFileMutation(relativePath: relativePath, operation: operation) ?? false
@@ -264,7 +301,8 @@ import AgentConnectionCore
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
-        window.toolbarStyle = .unifiedCompact
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbarStyle = .unified
         window.setContentSize(NSSize(width: 1200, height: 780))
         window.center()
 
@@ -422,9 +460,10 @@ import AgentConnectionCore
         outline.delegate = self
         outline.target = self
         outline.doubleAction = #selector(openSelectedFile)
-        outline.rowHeight = 24
+        outline.rowSizeStyle = .default
         outline.indentationPerLevel = 14
         outline.style = .sourceList
+        outline.backgroundColor = .clear
         outline.registerForDraggedTypes([.fileURL])
     }
 
@@ -594,6 +633,7 @@ import AgentConnectionCore
 
     func windowWillClose(_ notification: Notification) {
         workspaceClosed = true
+        cancelCapabilityApproval()
         contextRefreshGeneration += 1
         contextResolveGeneration += 1
         contextRefreshTask?.cancel()
@@ -613,6 +653,68 @@ import AgentConnectionCore
         refreshAgentContext()
     }
 
+    private func requestProjectCapability(_ request: AgentDynamicToolRequest) async -> AgentDynamicToolResult {
+        guard case let .object(arguments) = request.arguments,
+              case let .string(capabilityName)? = arguments["capability"],
+              case let .bool(enabled)? = arguments["enabled"],
+              let capability = ProjectCapability(rawValue: capabilityName) else {
+            return .rejected("request_project_capability requires a supported capability and enabled Boolean.")
+        }
+        let reason: String
+        if case let .string(value)? = arguments["reason"] { reason = value } else { reason = "The agent requested this capability." }
+        if await capabilityStore.isEnabled(capability) == enabled {
+            return .accepted(enabled ? "The project permission is already enabled." : "The project permission is already disabled.")
+        }
+        if enabled {
+            let approved = await confirmCapability(capability, reason: reason)
+            guard approved, !Task.isCancelled, !closing else {
+                return .rejected("The project permission was not approved.")
+            }
+        }
+        guard !Task.isCancelled, !closing else { return .rejected("The workspace is no longer available.") }
+        do {
+            try await capabilityStore.setEnabled(capability, enabled: enabled)
+            permissionsView.refresh()
+            return .accepted(enabled ? "The project permission was enabled." : "The project permission was disabled.")
+        } catch {
+            return .rejected("The project permission could not be saved.")
+        }
+    }
+
+    private func confirmCapability(_ capability: ProjectCapability, reason: String) async -> Bool {
+        await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled, capabilityApprovalContinuation == nil else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                let alert = NSAlert()
+                alert.messageText = "Allow \(capability == .computerUse ? "Computer Use" : "Terminal") in \(window.title)?"
+                alert.informativeText = "\(reason)\n\nThis is enabled for agents in this project. Commands run with your macOS account access; Computer Use can interact with other apps."
+                alert.addButton(withTitle: "Allow")
+                alert.addButton(withTitle: "Cancel")
+                capabilityApprovalContinuation = continuation
+                alert.beginSheetModal(for: window) { [weak self] response in
+                    guard let self, let continuation = self.capabilityApprovalContinuation else { return }
+                    self.capabilityApprovalContinuation = nil
+                    self.capabilityApprovalSheet = nil
+                    continuation.resume(returning: response == .alertFirstButtonReturn)
+                }
+                capabilityApprovalSheet = alert.window
+            }
+        }, onCancel: { [weak self] in
+            Task { @MainActor in self?.cancelCapabilityApproval() }
+        })
+    }
+
+    private func cancelCapabilityApproval() {
+        if let capabilityApprovalSheet { window.endSheet(capabilityApprovalSheet) }
+        guard let continuation = capabilityApprovalContinuation else { return }
+        capabilityApprovalContinuation = nil
+        capabilityApprovalSheet = nil
+        continuation.resume(returning: false)
+    }
+
     var canCloseProject: Bool { !closing && window.attachedSheet == nil && !textEditor.isBusy }
 
     var canSave: Bool {
@@ -621,12 +723,12 @@ import AgentConnectionCore
         case .todos: return projectSidebar.todoDetailView.canSave
         case .plans: return planEditorView.canSave
         case .agentContext: return agentContextView.canSave
-        case .files: return textEditor.canSave
+        case .files, .permissions: return textEditor.canSave
         }
     }
 
     var canFind: Bool {
-        terminalPane.isTerminalFocused || (projectSidebar.mode == .files && textEditor.canFind)
+        terminalPane.isTerminalFocused || ((projectSidebar.mode == .files || projectSidebar.mode == .permissions) && textEditor.canFind)
     }
     var isTerminalVisible: Bool { !terminalItem.isCollapsed }
     var canToggleTerminal: Bool { !closing && window.attachedSheet == nil }
@@ -638,7 +740,7 @@ import AgentConnectionCore
         case .todos: projectSidebar.todoDetailView.saveChanges()
         case .plans: planEditorView.saveCurrentFromUserAction()
         case .agentContext: agentContextView.saveCurrent()
-        case .files: Task { await textEditor.saveActive() }
+        case .files, .permissions: Task { await textEditor.saveActive() }
         }
     }
 
@@ -708,8 +810,14 @@ import AgentConnectionCore
         let workspacePanes = workspaceSplit.splitView.arrangedSubviews
         let editorPanes = editorSplit.splitView.arrangedSubviews
         if !sidebarItem.isCollapsed, workspacePanes.count > 0 { lastVisibleSidebarWidth = workspacePanes[0].frame.width }
-        if !assistantItem.isCollapsed, workspacePanes.count > 2 { lastVisibleAssistantWidth = workspacePanes[2].frame.width }
-        if !terminalItem.isCollapsed, editorPanes.count > 1 { lastVisibleTerminalHeight = editorPanes[1].frame.height }
+        if !assistantItem.isCollapsed, workspacePanes.count > 2 {
+            let split = workspaceSplit.splitView
+            let trailingEdgeOfDivider = workspacePanes[1].frame.maxX + split.dividerThickness
+            lastVisibleAssistantWidth = split.bounds.maxX - trailingEdgeOfDivider
+        }
+        if !terminalItem.isCollapsed, editorPanes.count > 1 {
+            lastVisibleTerminalHeight = editorPanes[1].frame.height
+        }
     }
 
 

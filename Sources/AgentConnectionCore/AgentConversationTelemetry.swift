@@ -4,17 +4,22 @@ import Foundation
 /// Values originate exclusively from Codex's `thread/tokenUsage/updated` event.
 public struct ConversationInputContextUsage: Codable, Sendable, Equatable {
     public let inputTokens: Int
-    public let modelContextWindow: Int
+    public let modelContextWindow: Int?
     public let modelID: String?
+    public let cacheReadTokens: Int?
+    public let cacheWriteTokens: Int?
 
-    public init(inputTokens: Int, modelContextWindow: Int, modelID: String?) {
+    public init(inputTokens: Int, modelContextWindow: Int?, modelID: String?, cacheReadTokens: Int? = nil, cacheWriteTokens: Int? = nil) {
         self.inputTokens = inputTokens
         self.modelContextWindow = modelContextWindow
         self.modelID = modelID
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
     }
 
-    public var utilization: Double {
-        Double(inputTokens) / Double(modelContextWindow)
+    public var utilization: Double? {
+        guard let modelContextWindow, modelContextWindow > 0 else { return nil }
+        return Double(inputTokens) / Double(modelContextWindow)
     }
 }
 

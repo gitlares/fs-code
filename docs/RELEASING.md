@@ -37,8 +37,10 @@ Run relevant tests and launch the signed app. Publish source matching the binary
 
 ## Updates
 
-Sparkle is bundled but the first release does not activate an update channel. Automatic update checks and installation are disabled by default.
+Version 0.1.1 activates the public feed at `https://raw.githubusercontent.com/gitlares/fs-code/main/updates/appcast.xml`. Version 0.1.0 needs one manual upgrade. Automatic update checks and installation remain disabled by default.
 
-To configure a future release, supply both `FS_CODE_SU_FEED_URL` (HTTPS) and `FS_CODE_SU_PUBLIC_ED_KEY` (Base64 Ed25519 public key). Keep the private update key outside source control. Generate a signed appcast using Sparkle's official tooling and test an upgrade between two actual releases before advertising automatic updates.
+The checked-in plist includes the feed and public key. To override them for a build, supply both `FS_CODE_SU_FEED_URL` (HTTPS) and `FS_CODE_SU_PUBLIC_ED_KEY` (Base64 Ed25519 public key). Keep the private update key outside source control. Generate a signed appcast using Sparkle's official tooling and test an upgrade between two actual releases before advertising automatic updates.
 
 Developer ID signing and Sparkle update signing are distinct. A notarized application alone does not establish an update channel.
+
+The production Sparkle key is held in Keychain under account `fs-code`. Never export its private key into this repository. After notarization and stapling, generate the appcast with the bundled Sparkle tool using `--account fs-code --download-url-prefix https://github.com/gitlares/fs-code/releases/download/TAG/`. Publish the release archive before pushing `updates/appcast.xml`. Verify the published ZIP hash and feed enclosure signature. Never change an archive after signing it.

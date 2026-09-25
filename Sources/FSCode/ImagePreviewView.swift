@@ -21,6 +21,8 @@ final class ImagePreviewView: NSView {
 
     private let imageView = NSImageView()
     private let statusLabel = NSTextField(labelWithString: "No image selected")
+    private let statusIcon = NSImageView()
+    private let statusRow = NSStackView()
     private var loadTask: Task<Void, Never>?
     private var generation = 0
 
@@ -47,17 +49,29 @@ final class ImagePreviewView: NSView {
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.setAccessibilityLabel("Image preview status")
-        addSubview(statusLabel)
+        statusIcon.imageScaling = .scaleProportionallyDown
+        statusIcon.isHidden = true
+        statusIcon.translatesAutoresizingMaskIntoConstraints = false
+        statusIcon.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        statusIcon.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        statusRow.orientation = .horizontal
+        statusRow.alignment = .centerY
+        statusRow.spacing = 5
+        statusRow.translatesAutoresizingMaskIntoConstraints = false
+        statusRow.addArrangedSubview(statusIcon)
+        statusRow.addArrangedSubview(statusLabel)
+        addSubview(statusRow)
 
         NSLayoutConstraint.activate([
             imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
             imageView.topAnchor.constraint(equalTo: topAnchor, constant: 24),
-            imageView.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
-            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            statusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
-            statusLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            statusLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 16)
+            imageView.bottomAnchor.constraint(equalTo: statusRow.topAnchor, constant: -12),
+            statusRow.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+            statusRow.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+            statusRow.centerXAnchor.constraint(equalTo: centerXAnchor),
+            statusRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            statusRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 16)
         ])
     }
 
@@ -67,7 +81,14 @@ final class ImagePreviewView: NSView {
 
     override func updateLayer() {
         // A semantic colour keeps transparent pixels legible in either appearance.
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 
     deinit {
@@ -161,7 +182,12 @@ final class ImagePreviewView: NSView {
 
     private func setStatus(_ text: String, isError: Bool) {
         statusLabel.stringValue = text
-        statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
+        statusLabel.textColor = isError ? .labelColor : .secondaryLabelColor
+        statusIcon.image = isError
+            ? NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Image preview error")
+            : nil
+        statusIcon.contentTintColor = .systemRed
+        statusIcon.isHidden = !isError
         statusLabel.setAccessibilityValue(text)
     }
 }

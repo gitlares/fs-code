@@ -1,5 +1,6 @@
 import AppKit
 import ProjectLibrary
+import EditorCore
 
 @MainActor final class DropView: NSView {
     var onDrop: (([URL]) -> Void)?
@@ -37,6 +38,8 @@ import ProjectLibrary
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation {
     var library: ProjectLibrary!
     var window: NSWindow!
+    private let themeStore = EditorThemeStore.shared
+    private var themeSettingsWindowController: ThemeSettingsWindowController?
     let table = ProjectTableView()
     let search = NSSearchField()
     var rows: [Project] = []
@@ -60,6 +63,8 @@ import ProjectLibrary
         buildMenu()
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 620), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "FS Code — Projects"
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbarStyle = .unified
         window.minSize = NSSize(width: 740, height: 420)
         window.isReleasedWhenClosed = false
         let root = DropView()
@@ -96,11 +101,12 @@ import ProjectLibrary
         stack.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 28), stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 28), stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24),
             controls.widthAnchor.constraint(equalTo: stack.widthAnchor), search.widthAnchor.constraint(equalTo: stack.widthAnchor), scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150)
         ])
         refresh(); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self] in self?.presentNextMissingThemeSelectionNotice() }
     }
     func buildMenu() {
         let main = NSMenu()
@@ -113,6 +119,8 @@ import ProjectLibrary
         checkForUpdates.toolTip = updater.unavailableReason
         checkForUpdates.isEnabled = updater.canCheckForUpdates
         appMenu.addItem(.separator())
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showThemeSettings), keyEquivalent: ",")
+        settings.target = self
         appMenu.addItem(withTitle: "Quit FS Code", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); main.addItem(file); file.submenu = NSMenu(title: "File")
         let newWindow = file.submenu!.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n")
@@ -188,6 +196,24 @@ import ProjectLibrary
         NSApp.orderFrontStandardAboutPanel(options: options)
     }
     @objc private func checkForUpdates(_ sender: Any?) { updater.checkForUpdates(sender) }
+    private func presentNextMissingThemeSelectionNotice() {
+        guard let hostWindow = activeWorkspace?.window ?? window else { return }
+        guard hostWindow.attachedSheet == nil else { return }
+        guard let notice = themeStore.consumeMissingSelectionNotice() else { return }
+        let alert = NSAlert()
+        alert.messageText = "Theme Unavailable"
+        alert.informativeText = notice
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: hostWindow) { [weak self] _ in
+            self?.presentNextMissingThemeSelectionNotice()
+        }
+    }
+    @objc private func showThemeSettings() {
+        if themeSettingsWindowController == nil {
+            themeSettingsWindowController = ThemeSettingsWindowController(store: themeStore)
+        }
+        themeSettingsWindowController?.show()
+    }
     private func appendCreditLink(to credits: NSMutableAttributedString, title: String, resource: String) {
         var attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12),
@@ -251,7 +277,12 @@ import ProjectLibrary
         }
         return true
     }
-    func applicationDidBecomeActive(_ notification: Notification) { if library != nil { refresh() } }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard library != nil else { return }
+        refresh()
+        themeStore.reload()
+        presentNextMissingThemeSelectionNotice()
+    }
     func applicationWillTerminate(_ notification: Notification) {
         for workspace in workspaces.values { workspace.saveLayout(); workspace.shutdownTerminal() }
     }

@@ -38,7 +38,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         textView.allowsImageEditing = false
         textView.drawsBackground = true
         textView.backgroundColor = .textBackgroundColor
-        textView.textColor = .textColor
+        textView.textColor = .labelColor
         textView.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
         textView.autoresizingMask = [.width]
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -97,7 +97,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
                 self.textView.setAccessibilityValue("Markdown rendering failed")
                 return
             }
-            self.textView.textStorage?.setAttributedString(Self.decorateTokens(in: Self.sanitizedLinks(in: Self.style(parsed))))
+            self.textView.textStorage?.setAttributedString(Self.decorateTokens(in: Self.sanitizedLinks(in: Self.style(parsed, presentation: .document))))
             self.textView.setAccessibilityValue("Markdown preview")
         }
     }
@@ -109,7 +109,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
               let parsed = try? AttributedString(markdown: normalizedSource(source, presentation: presentation), options: .init(interpretedSyntax: .full)) else {
             return nil
         }
-        return decorateTokens(in: sanitizedLinks(in: style(parsed)))
+        return decorateTokens(in: sanitizedLinks(in: style(parsed, presentation: presentation)))
     }
 
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
@@ -325,17 +325,10 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
             guard let match,
                   result.attribute(.link, at: match.range.location, effectiveRange: nil) == nil else { return }
             let existingFont = result.attribute(.font, at: match.range.location, effectiveRange: nil) as? NSFont
-            let isCodeFont = existingFont?.fontName.localizedCaseInsensitiveContains("mono") == true
-            let paragraph = (result.attribute(.paragraphStyle, at: match.range.location, effectiveRange: nil) as? NSParagraphStyle)?
-                .mutableCopy() as? NSMutableParagraphStyle
-            paragraph?.lineBreakMode = .byCharWrapping
             result.addAttributes([
-                .foregroundColor: isCodeFont ? NSColor.systemIndigo : NSColor.systemPurple,
+                .foregroundColor: NSColor.linkColor,
                 .font: NSFont.monospacedSystemFont(ofSize: existingFont?.pointSize ?? NSFont.smallSystemFontSize, weight: .regular)
             ], range: match.range)
-            if let paragraph {
-                result.addAttribute(.paragraphStyle, value: paragraph, range: match.range)
-            }
         }
         return result
     }
@@ -346,7 +339,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
     /// Foundation intentionally returns semantic runs without visual paragraph
     /// separators or list bullets. Reassemble only those block boundaries from
     /// its presentation intents; parsing of Markdown syntax remains Foundation's.
-    private static func style(_ markdown: AttributedString) -> NSAttributedString {
+    private static func style(_ markdown: AttributedString, presentation: Presentation) -> NSAttributedString {
         let bridged = NSAttributedString(markdown)
         let result = NSMutableAttributedString()
         let runs = Array(markdown.runs)
@@ -361,7 +354,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
             }
             if previous != renderingBlock, case let .listItem(ordinal, ordered)? = renderingBlock?.kind {
                 let marker = ordered ? "\(ordinal ?? 1). " : "• "
-                result.append(NSAttributedString(string: marker, attributes: listMarkerAttributes()))
+                result.append(NSAttributedString(string: marker, attributes: listMarkerAttributes(presentation: presentation)))
             }
 
             let attributes = bridged.attributes(at: range.location, effectiveRange: nil)
@@ -369,6 +362,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
             let inline = run.inlinePresentationIntent
             applyStyle(to: segment,
                        block: renderingBlock,
+                       presentation: presentation,
                        isInlineCode: inline?.contains(.code) == true,
                        isBold: inline?.contains(.stronglyEmphasized) == true,
                        isItalic: inline?.contains(.emphasized) == true)
@@ -405,6 +399,7 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
 
     private static func applyStyle(to text: NSMutableAttributedString,
                                    block: Block?,
+                                   presentation: Presentation,
                                    isInlineCode: Bool,
                                    isBold: Bool,
                                    isItalic: Bool) {
@@ -412,14 +407,14 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         guard range.length > 0 else { return }
         var attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
-            .foregroundColor: NSColor.textColor
+            .foregroundColor: NSColor.labelColor
         ]
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 9
         paragraph.lineBreakMode = .byWordWrapping
         switch block?.kind {
         case let .heading(level):
-            let sizes: [CGFloat] = [28, 24, 20, 18, 16, 14]
+            let sizes: [CGFloat] = presentation == .assistant ? [22, 20, 18, 16, 15, 14] : [28, 24, 20, 18, 16, 14]
             attributes[.font] = NSFont.systemFont(ofSize: sizes[max(0, min(level - 1, sizes.count - 1))], weight: .bold)
             paragraph.paragraphSpacingBefore = 12
             paragraph.paragraphSpacing = 8
@@ -443,7 +438,8 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
             paragraph.lineBreakMode = .byCharWrapping
         } else {
             var font = attributes[.font] as! NSFont
-            if isBold { font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) }
+            if isBold, presentation == .assistant { font = NSFont.systemFont(ofSize: font.pointSize, weight: .semibold) }
+            else if isBold { font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) }
             if isItalic { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
             attributes[.font] = font
         }
@@ -451,7 +447,12 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         text.addAttributes(attributes, range: range)
     }
 
-    private static func listMarkerAttributes() -> [NSAttributedString.Key: Any] {
-        [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.secondaryLabelColor]
+    private static func listMarkerAttributes(presentation: Presentation) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.paragraphSpacing = 9
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.firstLineHeadIndent = 0
+        paragraph.headIndent = 22
+        return [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph]
     }
 }

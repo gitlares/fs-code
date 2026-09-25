@@ -36,8 +36,8 @@ cp "$repo_dir/Resources/ThirdPartyNotices.txt" "$app_dir/Contents/Resources/Thir
 ditto "$sparkle_framework" "$app_dir/Contents/Frameworks/Sparkle.framework"
 
 if [[ -n "$feed_url" || -n "$public_key" ]]; then
-    /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $feed_url" "$app_dir/Contents/Info.plist"
-    /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $public_key" "$app_dir/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :SUFeedURL $feed_url" "$app_dir/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $public_key" "$app_dir/Contents/Info.plist"
 fi
 
 rpaths="$(otool -l "$app_dir/Contents/MacOS/FSCode")"

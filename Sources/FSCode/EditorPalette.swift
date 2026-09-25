@@ -1,48 +1,59 @@
 import AppKit
+import EditorCore
 
-/// Dracula and its light companion Alucard. See Resources/ThirdPartyNotices.txt.
-@MainActor struct EditorPalette {
+/// Editor-only colors. `init(appearance:)` deliberately remains on the bundled
+/// pair so tabs and other native chrome never inherit an imported text theme.
+@MainActor
+struct EditorPalette {
     let background: NSColor
     let foreground: NSColor
-    let selection: NSColor
-    var currentLine: NSColor { selection.withAlphaComponent(0.35) }
+    let currentLine: NSColor
     let comment: NSColor
-    let cyan: NSColor
-    let green: NSColor
-    let orange: NSColor
-    let pink: NSColor
-    let purple: NSColor
-    let yellow: NSColor
+    let currentLineNumber: NSColor
+    let cursor: NSColor
+    let ansiColors: [NSColor]
+    private let theme: EditorTheme
 
     init(appearance: NSAppearance) {
         let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        background = Self.color(dark ? 0x282a36 : 0xfffbeb)
-        foreground = Self.color(dark ? 0xf8f8f2 : 0x1f1f1f)
-        selection = Self.color(dark ? 0x44475a : 0xcfcfde)
-        comment = Self.color(dark ? 0x6272a4 : 0x6c664b)
-        cyan = Self.color(dark ? 0x8be9fd : 0x036a96)
-        green = Self.color(dark ? 0x50fa7b : 0x14710a)
-        orange = Self.color(dark ? 0xffb86c : 0xa34d14)
-        pink = Self.color(dark ? 0xff79c6 : 0xa3144d)
-        purple = Self.color(dark ? 0xbd93f9 : 0x644ac9)
-        yellow = Self.color(dark ? 0xf1fa8c : 0x846e15)
+        self.init(theme: dark ? .dracula : .alucard)
     }
 
-    private static func color(_ hex: Int) -> NSColor {
-        NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
-                green: CGFloat((hex >> 8) & 255) / 255,
-                blue: CGFloat(hex & 255) / 255, alpha: 1)
+    init(theme: EditorTheme) {
+        self.theme = theme
+        background = Self.color(theme.background)
+        foreground = Self.color(theme.foreground)
+        currentLine = Self.color(theme.currentLine)
+        comment = Self.color(theme.comment)
+        currentLineNumber = Self.color(theme.currentLineNumber)
+        cursor = Self.color(theme.cursor)
+        ansiColors = theme.ansiColors.map(Self.color)
+    }
+
+    func color(for kind: SyntaxTokenKind) -> NSColor {
+        Self.color(theme.tokenColor(for: kind))
+    }
+
+    private static func color(_ rgb: ThemeRGB) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat(rgb.red) / 255,
+            green: CGFloat(rgb.green) / 255,
+            blue: CGFloat(rgb.blue) / 255,
+            alpha: rgb.alpha
+        )
     }
 }
 
 @MainActor final class CodeTextView: NSTextView {
     var onAppearanceChange: (() -> Void)?
+    var onSelectionFocusChange: ((Bool) -> Void)?
     var currentLineColor = NSColor.clear
-    var agentChangeColor = NSColor.systemOrange.withAlphaComponent(0.16)
+    var agentChangeColor = NSColor.controlAccentColor.withAlphaComponent(0.16)
     var agentChangeRanges: [NSRange] = [] {
         didSet { needsDisplay = true }
     }
     private var previousLineRect: NSRect?
+    private var windowObservers: [NSObjectProtocol] = []
 
     /// The visual row containing the insertion point; no attributes or undo edits.
     var currentLineRect: NSRect? {
@@ -116,5 +127,36 @@ import AppKit
         super.viewDidChangeEffectiveAppearance()
         onAppearanceChange?()
         needsDisplay = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+        windowObservers.removeAll()
+        guard let window else { return }
+        let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            windowObservers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, let currentWindow = self.window else { return }
+                    let focused = currentWindow.isKeyWindow && currentWindow.firstResponder === self
+                    self.onSelectionFocusChange?(focused)
+                }
+            })
+        }
+    }
+
+    isolated deinit { windowObservers.forEach(NotificationCenter.default.removeObserver) }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onSelectionFocusChange?(window?.isKeyWindow == true) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onSelectionFocusChange?(false) }
+        return accepted
     }
 }

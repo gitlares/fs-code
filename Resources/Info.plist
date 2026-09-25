@@ -11,12 +11,14 @@
     <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Daniel Lares.</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.1</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>SUEnableAutomaticChecks</key><false/>
     <key>SUAutomaticallyUpdate</key><false/>
+    <key>SUFeedURL</key><string>https://raw.githubusercontent.com/gitlares/fs-code/main/updates/appcast.xml</string>
+    <key>SUPublicEDKey</key><string>wS0ZZ0trf9KiircRUipqzgk2HOjNcYCwTvEK/3RobDw=</string>
 </dict>
 </plist>

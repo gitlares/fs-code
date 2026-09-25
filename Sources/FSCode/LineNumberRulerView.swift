@@ -8,6 +8,7 @@ final class LineNumberRulerView: NSRulerView {
     private var lineIndex = LineIndex()
     private var foregroundColor = NSColor.secondaryLabelColor
     private var backgroundColor = NSColor.textBackgroundColor
+    private var currentLineForegroundColor = NSColor.labelColor
     private var agentChangeRanges: [NSRange] = []
     private let numberFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
     private let agentChangeFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
@@ -44,6 +45,13 @@ final class LineNumberRulerView: NSRulerView {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in self?.needsDisplay = true }
+            },
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+                object: NSWorkspace.shared,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.needsDisplay = true }
             }
         ]
     }
@@ -55,6 +63,7 @@ final class LineNumberRulerView: NSRulerView {
     isolated deinit {
         let notificationCenter = NotificationCenter.default
         notificationObservers.forEach(notificationCenter.removeObserver)
+        notificationObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
     }
 
     override var isFlipped: Bool { true }
@@ -74,9 +83,10 @@ final class LineNumberRulerView: NSRulerView {
         lineIndex.position(atUTF16Offset: offset)
     }
 
-    func applyColors(background: NSColor, foreground: NSColor) {
+    func applyColors(background: NSColor, foreground: NSColor, currentLineForeground: NSColor? = nil) {
         backgroundColor = background
         foregroundColor = foreground
+        currentLineForegroundColor = currentLineForeground ?? foreground
         needsDisplay = true
     }
 
@@ -104,10 +114,7 @@ final class LineNumberRulerView: NSRulerView {
             return
         }
 
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: numberFont,
-            .foregroundColor: foregroundColor
-        ]
+        let selectedLine = lineIndex.position(atUTF16Offset: textView.selectedRange().location).line
         let endLocation = viewportRange.endLocation
         textLayoutManager.enumerateTextLayoutFragments(
             from: viewportRange.location,
@@ -126,7 +133,13 @@ final class LineNumberRulerView: NSRulerView {
                 guard self.lineIndex.lineStarts.binarySearch(contains: characterOffset) else { continue }
 
                 let lineNumber = self.lineIndex.lineNumber(atUTF16Offset: characterOffset)
-                let label = NSAttributedString(string: String(lineNumber), attributes: attributes)
+                let label = NSAttributedString(
+                    string: String(lineNumber),
+                    attributes: [
+                        .font: numberFont,
+                        .foregroundColor: lineNumber == selectedLine ? currentLineForegroundColor : foregroundColor
+                    ]
+                )
                 let labelSize = label.size()
                 let textRect = lineFragment.typographicBounds.offsetBy(
                     dx: textView.textContainerOrigin.x + fragment.layoutFragmentFrame.minX,
@@ -148,7 +161,12 @@ final class LineNumberRulerView: NSRulerView {
                 }) {
                     NSAttributedString(
                         string: "✦",
-                        attributes: [.font: self.agentChangeFont, .foregroundColor: NSColor.systemOrange]
+                        attributes: [
+                            .font: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+                                ? NSFont.systemFont(ofSize: 11, weight: .bold)
+                                : self.agentChangeFont,
+                            .foregroundColor: NSColor.controlAccentColor
+                        ]
                     ).draw(at: NSPoint(x: 3, y: y))
                 }
                 label.draw(at: NSPoint(x: x, y: y))

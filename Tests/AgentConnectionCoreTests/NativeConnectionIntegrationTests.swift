@@ -100,11 +100,13 @@ final class NativeConnectionIntegrationTests: XCTestCase {
     }
 
     func testCatalogUsesBackendCapabilitiesAndFiltersUnsupportedEntries() throws {
-        let data = Data(#"{"models":[{"slug":"test","display_name":"Test","visibility":"list","context_window":100000,"supported_reasoning_levels":[{"effort":"medium"},{"effort":"ultra"}],"default_reasoning_level":"medium"},{"slug":"hidden","visibility":"hide"}]}"#.utf8)
+        let data = Data(#"{"models":[{"slug":"test","display_name":"Test","visibility":"list","context_window":272000,"max_context_window":872000,"supported_reasoning_levels":[{"effort":"medium"},{"effort":"ultra"}],"default_reasoning_level":"medium"},{"slug":"hidden","visibility":"hide"}]}"#.utf8)
         let catalog = try NativeProviderConnection.parseCatalog(data, kind: .chatGPT)
         XCTAssertEqual(catalog.models.map(\.id), ["test"])
         XCTAssertEqual(catalog.models[0].supportedReasoningEfforts, ["medium"])
-        XCTAssertEqual(catalog.windows["test"], 100000)
+        XCTAssertEqual(catalog.windows["test"], 272000)
+        XCTAssertEqual(catalog.models[0].defaultContextWindow, 272000)
+        XCTAssertEqual(catalog.models[0].maximumContextWindow, 872000)
     }
 
     func testChatGPTCatalogUsesCodexProtocolCompatibilityVersion() throws {

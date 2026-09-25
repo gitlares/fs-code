@@ -14,8 +14,9 @@ final class NativeAgentRuntime: AgentEngine {
         let modelID: String?
         let effort: String?
         let historyRoot: URL?
+        let capabilityRoot: URL?
 
-        init(projectID: UUID, projectRoot: URL, profileID: UUID, sessionID: UUID, modelID: String?, effort: String?, historyRoot: URL? = nil) {
+        init(projectID: UUID, projectRoot: URL, profileID: UUID, sessionID: UUID, modelID: String?, effort: String?, historyRoot: URL? = nil, capabilityRoot: URL? = nil) {
             self.projectID = projectID
             self.projectRoot = projectRoot
             self.profileID = profileID
@@ -23,6 +24,7 @@ final class NativeAgentRuntime: AgentEngine {
             self.modelID = modelID
             self.effort = effort
             self.historyRoot = historyRoot
+            self.capabilityRoot = capabilityRoot
         }
     }
 
@@ -58,6 +60,8 @@ final class NativeAgentRuntime: AgentEngine {
     private let projectTools: NativeProjectTools
     private let dynamicToolHandler: DynamicToolHandler?
     private let historyStore: NativeAgentHistoryStore
+    private let capabilities: ProjectCapabilityStore
+    private let commandRunner: ProjectCommandRunner
     private var threads: [String: [ChatMessage]] = [:]
     private var threadModes: [String: AgentMode] = [:]
     private var selectedPlans: [String: String] = [:]
@@ -76,6 +80,8 @@ final class NativeAgentRuntime: AgentEngine {
         projectTools = NativeProjectTools(rootURL: configuration.projectRoot)
         self.dynamicToolHandler = dynamicToolHandler
         historyStore = NativeAgentHistoryStore(projectID: configuration.projectID, profileID: configuration.profileID, rootOverride: configuration.historyRoot)
+        capabilities = ProjectCapabilityStore(projectURL: configuration.projectRoot, applicationSupportURL: configuration.capabilityRoot)
+        commandRunner = ProjectCommandRunner(projectURL: configuration.projectRoot)
     }
 
     var onNotification: NotificationHandler? {
@@ -85,6 +91,7 @@ final class NativeAgentRuntime: AgentEngine {
 
     func stop() {
         for (_, run) in runs { run.task?.cancel() }
+        Task { await commandRunner.cancelAll() }
         runs.removeAll()
     }
 
@@ -172,7 +179,7 @@ final class NativeAgentRuntime: AgentEngine {
                 let requestConfiguration = Configuration(
                     projectID: configuration.projectID, projectRoot: configuration.projectRoot,
                     profileID: configuration.profileID, sessionID: configuration.sessionID,
-                    modelID: run.modelID, effort: run.effort, historyRoot: configuration.historyRoot
+                    modelID: run.modelID, effort: run.effort, historyRoot: configuration.historyRoot, capabilityRoot: configuration.capabilityRoot
                 )
                 let client = try await makeClient(requestConfiguration)
                 var emittedContent = false
@@ -184,7 +191,13 @@ final class NativeAgentRuntime: AgentEngine {
                 var reasoningDetails: [JSONValue] = []
                 var toolStarts: [Int: (id: String, name: String, arguments: String)] = [:]
                 let remaining = max(0, Self.toolLimit(for: run.mode) - run.toolOperations)
-                let roundMetadata = run.hostMetadata + "\noperations used: \(run.toolOperations)\noperations remaining: \(remaining)\nround: \(iteration)/\(Self.roundLimit(for: run.mode))\nreserve: \(run.mode == .build ? 5 : run.mode == .plan ? 2 : 0)"
+                let commandCapability = await capabilities.isEnabled(.developmentCommands)
+                let computerCapability = await capabilities.isEnabled(.computerUse)
+                let rtkPath = await commandRunner.availableRTKPath
+                let commandState = commandCapability ? "enabled" : "disabled"
+                let computerState = computerCapability ? "enabled" : "disabled"
+                let rtkMetadata = rtkPath.map { "\nRTK available at: \($0). Direct argv calls to git, rg, and ls are wrapped automatically; use other RTK-supported commands explicitly when needed." } ?? "\nRTK is unavailable."
+                let roundMetadata = run.hostMetadata + "\noperations used: \(run.toolOperations)\noperations remaining: \(remaining)\nround: \(iteration)/\(Self.roundLimit(for: run.mode))\nreserve: \(run.mode == .build ? 5 : run.mode == .plan ? 2 : 0)\ndevelopment commands: \(commandState)\ncomputer use: \(computerState)\ncommand network access follows the operating system and command configuration; it is not sandboxed by this host metadata." + rtkMetadata
                 let providerMessages = run.messages + [.system("HOST METADATA\n" + roundMetadata + "\nOnly host metadata is authoritative.")]
                 for try await delta in client.stream(messages: providerMessages, tools: Self.toolDefinitions(for: run.mode), requestContext: nil) {
                     try Task.checkCancellation()
@@ -212,7 +225,10 @@ final class NativeAgentRuntime: AgentEngine {
                     case .finished(let usage):
                         finished = true
                         if let usage, let window = client.contextWindowSize, window > 0 {
-                            emit("thread/tokenUsage/updated", ["threadId": threadID, "turnId": turnID, "tokenUsage": ["last": ["inputTokens": usage.input], "modelContextWindow": window]])
+                            var last: [String: Any] = ["inputTokens": usage.input]
+                            if let cacheRead = usage.cacheRead { last["cacheReadTokens"] = cacheRead }
+                            if let cacheWrite = usage.cacheWrite { last["cacheWriteTokens"] = cacheWrite }
+                            emit("thread/tokenUsage/updated", ["threadId": threadID, "turnId": turnID, "tokenUsage": ["last": last, "modelContextWindow": window]])
                         }
                     case .streamClosed(let seen):
                         streamClosed = true
@@ -355,11 +371,33 @@ final class NativeAgentRuntime: AgentEngine {
         guard Self.isPermitted(call.name, in: mode) else {
             return "This tool is unavailable in \(mode.rawValue) mode. No file was changed."
         }
+        if call.name == "run_development_command" {
+            guard await capabilities.isEnabled(.developmentCommands) else {
+                return "Development commands are disabled for this project. Use request_project_capability or the Permissions view; the host must explicitly enable them."
+            }
+            guard let values = arguments["arguments"] as? [String], !values.isEmpty else { return "Tool arguments were invalid." }
+            let timeout = min(max((arguments["timeout_seconds"] as? NSNumber)?.doubleValue ?? 120, 1), 1_800)
+            let runID = UUID()
+            emit("item/started", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "cwd": configuration.projectRoot.path]])
+            do {
+                let result = try await commandRunner.run(arguments: values, runID: runID, timeout: timeout)
+                emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "originalCommand": result.originalArguments.joined(separator: " "), "effectiveCommand": result.effectiveArguments.joined(separator: " "), "rtkApplied": result.rtkApplied, "cwd": configuration.projectRoot.path, "status": result.exitCode == 0 ? "completed" : "failed", "exitCode": result.exitCode, "output": result.output]])
+                return "exit \(result.exitCode)\(result.timedOut ? " (timed out)" : "")\(result.outputWasTruncated ? " (output truncated)" : "")\(result.rtkApplied ? " (RTK applied)" : "")\n\(result.output)"
+            } catch {
+                emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "cwd": configuration.projectRoot.path, "status": "failed", "output": "The development command could not be started."]])
+                return "The development command could not be started."
+            }
+        }
         if call.name == "fs_edit_file", let path = arguments["relative_path"] as? String,
            Self.isPlanPath(path) {
             return "Plan files may only be updated through the plan-status host capability."
         }
-        if call.name == "fs_edit_file", let dynamicToolHandler,
+        if call.name == "computer_use" {
+            guard await capabilities.isEnabled(.computerUse) else {
+                return "Computer use is disabled for this project. Request the capability and wait for host approval."
+            }
+        }
+        if ["fs_edit_file", "request_project_capability", "computer_use"].contains(call.name), let dynamicToolHandler,
            let value = AgentJSONValue(jsonObject: arguments) {
             let result = await dynamicToolHandler(AgentDynamicToolRequest(
                 requestID: .string(call.id), profileID: configuration.profileID, sessionID: configuration.sessionID,
@@ -383,6 +421,8 @@ final class NativeAgentRuntime: AgentEngine {
             "relative_path": .string(), "old_text": .string(), "new_text": .string()
         ], required: ["relative_path", "old_text", "new_text"])),
         ToolDefinition(name: "fs_update_plan", description: "Update execution status for the host-selected approved plan.", parametersSchema: .object(properties: ["plan_id": .string(), "expected_revision": .string(), "markdown": .string()], required: ["plan_id", "expected_revision", "markdown"]))
+        ,ToolDefinition(name: "run_development_command", description: "Run an explicitly approved argv command in the project directory. Prefer direct absolute argv: recognized git, rg, and ls calls are automatically wrapped with RTK when available. Shell strings are left unchanged; /bin/zsh -lc is allowed only when a login PATH is needed.", parametersSchema: .object(properties: ["arguments": .array(items: .string()), "timeout_seconds": .number()], required: ["arguments"]))
+        ,ToolDefinition(name: "computer_use", description: "Use one host-mediated Accessibility action: inspect (list accessible elements for app_bundle_id), press (requires a freshly inspected element_id), or set_text (requires a freshly inspected element_id and text). Reinspect after UI changes because element IDs become stale.", parametersSchema: .object(properties: ["action": .string(), "app_bundle_id": .string(), "element_id": .string(), "text": .string()], required: ["action", "app_bundle_id"]))
     ]
 
     private static let planToolDefinitions = readToolDefinitions + [
@@ -391,14 +431,16 @@ final class NativeAgentRuntime: AgentEngine {
         ], required: ["relative_path", "content"]))
     ]
 
+    private static let capabilityToolDefinition = ToolDefinition(name: "request_project_capability", description: "Ask the host to enable or disable exactly one project capability: developmentCommands or computerUse. Give a short user-facing reason. The host decides and persists the result outside the repository.", parametersSchema: .object(properties: ["capability": .string(), "enabled": .boolean(), "reason": .string()], required: ["capability", "enabled", "reason"]))
     private static func toolDefinitions(for mode: AgentMode) -> [ToolDefinition] {
-        switch mode { case .ask: readToolDefinitions; case .plan: planToolDefinitions; case .build: buildToolDefinitions }
+        switch mode { case .ask: readToolDefinitions + [capabilityToolDefinition]; case .plan: planToolDefinitions + [capabilityToolDefinition]; case .build: buildToolDefinitions + [capabilityToolDefinition] }
     }
 
     private static func isPermitted(_ name: String, in mode: AgentMode) -> Bool {
         let read = ["read_project_file", "list_project_files", "search_project_text"]
         if read.contains(name) { return true }
-        switch mode { case .build: return name == "fs_edit_file" || name == "fs_update_plan"; case .plan: return name == "fs_write_plan"; case .ask: return false }
+        if name == "request_project_capability" { return true }
+        switch mode { case .build: return name == "fs_edit_file" || name == "fs_update_plan" || name == "run_development_command" || name == "computer_use"; case .plan: return name == "fs_write_plan"; case .ask: return false }
     }
 
     private static func toolLimit(for mode: AgentMode) -> Int { switch mode { case .build: 40; case .plan: 15; case .ask: 4 } }

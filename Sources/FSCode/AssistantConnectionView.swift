@@ -4,6 +4,7 @@ import AgentConnectionCore
 @MainActor
 final class AssistantConnectionView: NSView {
     private let manager: AgentConnectionManager
+    private let conversation: AgentConversationManager
     private let chatView: AssistantChatView
     private var observerID: UUID?
     private var clientID: UUID?
@@ -16,7 +17,10 @@ final class AssistantConnectionView: NSView {
 
     private let connectionPopup: NSPopUpButton
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let connectionProgress = NSProgressIndicator()
     private let recoveryLabel = NSTextField(wrappingLabelWithString: "")
+    private let recoveryIcon = NSImageView()
+    private let recoveryRow = NSStackView()
     private let connectButton = NSButton(title: "Connect", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let copyCodeButton = NSButton(title: "Copy Code", target: nil, action: nil)
@@ -26,12 +30,14 @@ final class AssistantConnectionView: NSView {
 
     init(manager: AgentConnectionManager, projectURL: URL) {
         self.manager = manager
+        let conversation = AgentConversationManager(projectURL: projectURL, connectionManager: manager)
+        self.conversation = conversation
         let connectionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         self.connectionPopup = connectionPopup
         let manageButton = NSButton(title: "", target: nil, action: nil)
         self.manageButton = manageButton
         chatView = AssistantChatView(
-            manager: AgentConversationManager(projectURL: projectURL, connectionManager: manager),
+            manager: conversation,
             connectionManager: manager,
             projectURL: projectURL,
             selectedProfileID: { manager.selectedProfileID },
@@ -80,6 +86,14 @@ final class AssistantConnectionView: NSView {
         try await chatView.executePlan(planID: planID)
     }
 
+    func configureHostToolHandlers(
+        requestCapability: @escaping @MainActor @Sendable (AgentDynamicToolRequest) async -> AgentDynamicToolResult,
+        computerUse: @escaping @MainActor @Sendable (AgentDynamicToolRequest) async -> AgentDynamicToolResult
+    ) {
+        conversation.requestProjectCapability = requestCapability
+        conversation.performComputerUse = computerUse
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         updateSurfaceColor()
@@ -87,7 +101,7 @@ final class AssistantConnectionView: NSView {
 
     private func updateSurfaceColor() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         }
     }
 
@@ -170,9 +184,25 @@ final class AssistantConnectionView: NSView {
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.maximumNumberOfLines = 3
         statusLabel.setAccessibilityLabel("Connection status")
+        connectionProgress.style = .spinning
+        connectionProgress.controlSize = .small
+        connectionProgress.isDisplayedWhenStopped = false
         recoveryLabel.font = .systemFont(ofSize: 11)
-        recoveryLabel.textColor = .secondaryLabelColor
+        recoveryLabel.textColor = .labelColor
         recoveryLabel.maximumNumberOfLines = 2
+        recoveryIcon.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Connection error")
+        recoveryIcon.contentTintColor = .systemRed
+        recoveryIcon.imageScaling = .scaleProportionallyDown
+        recoveryIcon.widthAnchor.constraint(equalToConstant: 13).isActive = true
+        recoveryIcon.heightAnchor.constraint(equalToConstant: 13).isActive = true
+        let statusRow = NSStackView(views: [connectionProgress, statusLabel])
+        statusRow.orientation = .horizontal
+        statusRow.alignment = .firstBaseline
+        statusRow.spacing = 5
+        recoveryRow.setViews([recoveryIcon, recoveryLabel], in: .leading)
+        recoveryRow.orientation = .horizontal
+        recoveryRow.alignment = .firstBaseline
+        recoveryRow.spacing = 5
 
         for (button, action, label) in [
             (connectButton, #selector(connect), "Connect"),
@@ -203,7 +233,7 @@ final class AssistantConnectionView: NSView {
         chatView.setContentHuggingPriority(.defaultLow, for: .vertical)
         chatView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         let content = NSStackView(views: [
-            statusLabel, recoveryLabel, primaryActions, chatView
+            statusRow, recoveryRow, primaryActions, chatView
         ])
         content.orientation = .vertical
         content.alignment = .centerX
@@ -211,7 +241,7 @@ final class AssistantConnectionView: NSView {
         content.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
-        for control in [statusLabel, recoveryLabel, primaryActions] {
+        for control in [statusRow, recoveryRow, primaryActions] {
             control.translatesAutoresizingMaskIntoConstraints = false
             control.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -24).isActive = true
         }
@@ -221,7 +251,7 @@ final class AssistantConnectionView: NSView {
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.trailingAnchor.constraint(equalTo: trailingAnchor),
-            content.topAnchor.constraint(equalTo: topAnchor),
+            content.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
             content.bottomAnchor.constraint(equalTo: bottomAnchor),
             chatView.heightAnchor.constraint(greaterThanOrEqualToConstant: 220)
         ])
@@ -277,6 +307,8 @@ final class AssistantConnectionView: NSView {
         case .connecting, .awaitingBrowserLogin, .loadingModels: isLoggingIn = true
         default: isLoggingIn = false
         }
+        if isLoggingIn { connectionProgress.startAnimation(nil) }
+        else { connectionProgress.stopAnimation(nil) }
         let isConnected: Bool
         if case .connected = manager.state { isConnected = true } else { isConnected = false }
         connectButton.title = "Connect"
@@ -319,6 +351,8 @@ final class AssistantConnectionView: NSView {
             recoveryLabel.stringValue = ""
         }
         recoveryLabel.isHidden = recoveryLabel.stringValue.isEmpty
+        recoveryIcon.isHidden = recoveryLabel.isHidden
+        recoveryRow.isHidden = recoveryLabel.isHidden
         openPendingLoginIfNeeded()
     }
 

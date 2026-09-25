@@ -99,19 +99,25 @@ public struct ConversationModelOption: Identifiable, Hashable, Sendable {
     public let supportedEfforts: [ConversationReasoningEffort]
     public let defaultEffort: ConversationReasoningEffort?
     public let isDefault: Bool
+    public let defaultContextWindow: Int?
+    public let maximumContextWindow: Int?
 
     public init(
         id: String,
         displayName: String,
         supportedEfforts: [ConversationReasoningEffort],
         defaultEffort: ConversationReasoningEffort?,
-        isDefault: Bool
+        isDefault: Bool,
+        defaultContextWindow: Int? = nil,
+        maximumContextWindow: Int? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.supportedEfforts = supportedEfforts
         self.defaultEffort = defaultEffort
         self.isDefault = isDefault
+        self.defaultContextWindow = defaultContextWindow
+        self.maximumContextWindow = maximumContextWindow
     }
 }
 
@@ -493,7 +499,7 @@ private actor AgentConversationStore {
                 throw AgentConversationError.corruptStore
             }
             if let usage = conversation.inputContextUsage,
-               usage.inputTokens < 0 || usage.modelContextWindow <= 0 {
+               usage.inputTokens < 0 || (usage.modelContextWindow != nil && usage.modelContextWindow! <= 0) {
                 throw AgentConversationError.corruptStore
             }
             if let summaries = conversation.activitySummaries,
@@ -634,6 +640,10 @@ public final class AgentConversationManager {
         _ operation: ConversationFileMutationOperation
     ) async -> Bool)?
     public var didCompleteFileMutation: (@MainActor @Sendable (ConversationFileMutationResult) -> Void)?
+    /// Workspace-owned approval/UI callbacks. They receive an identity-bound request and must
+    /// persist any grant through `ProjectCapabilityStore`; returning approval alone grants nothing.
+    public var requestProjectCapability: (@MainActor @Sendable (AgentDynamicToolRequest) async -> AgentDynamicToolResult)?
+    public var performComputerUse: (@MainActor @Sendable (AgentDynamicToolRequest) async -> AgentDynamicToolResult)?
 
     public var models: [ConversationModelOption] {
         transport.connectionModels.map { model in
@@ -642,7 +652,9 @@ public final class AgentConversationManager {
                 displayName: model.displayName,
                 supportedEfforts: model.supportedReasoningEfforts.compactMap(ConversationReasoningEffort.init),
                 defaultEffort: model.defaultReasoningEffort.flatMap(ConversationReasoningEffort.init),
-                isDefault: model.isDefault
+                isDefault: model.isDefault,
+                defaultContextWindow: model.defaultContextWindow,
+                maximumContextWindow: model.maximumContextWindow
             )
         }
     }
@@ -1659,7 +1671,7 @@ public final class AgentConversationManager {
             "sandbox": "read-only",
             "developerInstructions": effectivePrompt,
             "agentMode": activeMode.rawValue,
-            "hostMetadata": "mode: \(activeMode.rawValue)\ntool budget: \(activeMode == .build ? 40 : activeMode == .plan ? 15 : 4)\nnetwork access: false" + (selectedPlanSnapshot.map { "\nselected plan: .fs/plans/\($0.id).md\nselected plan hash: \($0.hash)" } ?? ""),
+            "hostMetadata": "mode: \(activeMode.rawValue)\ntool budget: \(activeMode == .build ? 40 : activeMode == .plan ? 15 : 4)\ncapabilities are host-controlled" + (selectedPlanSnapshot.map { "\nselected plan: .fs/plans/\($0.id).md\nselected plan hash: \($0.hash)" } ?? ""),
             "config": [
                 "project_doc_max_bytes": 0,
                 "projects": [projectPath: ["trust_level": "untrusted"]]
@@ -1707,7 +1719,23 @@ public final class AgentConversationManager {
     ]
 
     private func handleDynamicTool(_ request: AgentDynamicToolRequest) async -> AgentDynamicToolResult {
-        guard request.namespace == nil, request.toolName == "fs_edit_file" else {
+        guard request.namespace == nil else {
+            return .rejected("FS Code does not allow this host tool.")
+        }
+        guard let identity = bindAndValidateFileToolRequest(request) else {
+            return .rejected("This tool call belongs to a chat or account that is no longer active.")
+        }
+        if request.toolName == "request_project_capability" {
+            guard let requestProjectCapability else { return .rejected("Project capability approval is unavailable.") }
+            let result = await requestProjectCapability(request)
+            return isCurrent(identity) ? result : .rejected("The active chat changed before capability approval completed.")
+        }
+        if request.toolName == "computer_use" {
+            guard mode == .build, let performComputerUse else { return .rejected("Computer use is unavailable outside Build mode or without host permission.") }
+            let result = await performComputerUse(request)
+            return isCurrent(identity) ? result : .rejected("The active chat changed before computer use completed.")
+        }
+        guard request.toolName == "fs_edit_file" else {
             return .rejected("FS Code does not allow this host tool.")
         }
         guard mode == .build else { return .rejected("Editing files is unavailable outside Build mode.") }
@@ -1723,9 +1751,6 @@ public final class AgentConversationManager {
         }
         guard let service = fileChangeService else {
             return .rejected("The audited project file service is unavailable.")
-        }
-        guard let identity = bindAndValidateFileToolRequest(request) else {
-            return .rejected("This file change belongs to a chat or account that is no longer active.")
         }
         guard let arguments = Self.fileEditArguments(request.arguments) else {
             return .rejected(
@@ -1997,7 +2022,9 @@ public final class AgentConversationManager {
         let modelBoundUsage = ConversationInputContextUsage(
             inputTokens: usage.inputTokens,
             modelContextWindow: usage.modelContextWindow,
-            modelID: modelID
+            modelID: modelID,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens
         )
         document.conversations[index].inputContextUsage = modelBoundUsage
         lastRequestInputContext = modelBoundUsage
@@ -2122,16 +2149,19 @@ public final class AgentConversationManager {
         }
     }
 
-    private static func inputContextUsage(from params: [String: Any]) -> (inputTokens: Int, modelContextWindow: Int)? {
+    private static func inputContextUsage(from params: [String: Any]) -> (inputTokens: Int, modelContextWindow: Int?, cacheReadTokens: Int?, cacheWriteTokens: Int?)? {
         guard let tokenUsage = params["tokenUsage"] as? [String: Any],
               let last = tokenUsage["last"] as? [String: Any],
-              let inputTokens = strictInteger(last["inputTokens"]),
-              let modelContextWindow = strictInteger(tokenUsage["modelContextWindow"]),
-              inputTokens >= 0,
-              modelContextWindow > 0 else {
+              let inputTokens = strictInteger(last["inputTokens"]), inputTokens >= 0 else {
             return nil
         }
-        return (inputTokens, modelContextWindow)
+        let modelContextWindow = strictInteger(tokenUsage["modelContextWindow"])
+        guard modelContextWindow == nil || modelContextWindow! > 0 else { return nil }
+        let cacheRead = strictInteger(last["cacheReadTokens"])
+        let cacheWrite = strictInteger(last["cacheWriteTokens"])
+        guard cacheRead == nil || cacheRead! >= 0,
+              cacheWrite == nil || cacheWrite! >= 0 else { return nil }
+        return (inputTokens, modelContextWindow, cacheRead, cacheWrite)
     }
 
     private static func strictInteger(_ value: Any?) -> Int? {
@@ -2167,7 +2197,7 @@ public final class AgentConversationManager {
         default: return nil
         }
         guard let itemID = item["id"] as? String, !itemID.isEmpty else { return nil }
-        let operation = ["command", "tool", "toolName", "name", "operation"]
+        let operation = ["effectiveCommand", "command", "tool", "toolName", "name", "operation"]
             .compactMap { item[$0] as? String }
             .first
             .map { boundedTelemetryText($0, maximumBytes: 4_096) }

@@ -284,6 +284,35 @@ final class NativeAgentRuntimeTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    func testAskAndPlanRejectInjectedDevelopmentCommandsEvenWhenProjectCapabilityIsEnabled() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let marker = root.appendingPathComponent("marker")
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: support) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let capabilities = ProjectCapabilityStore(projectURL: root, applicationSupportURL: support)
+        try await capabilities.setEnabled(.developmentCommands, enabled: true)
+        for mode in [AgentMode.ask, .plan] {
+            let runtime = NativeAgentRuntime(
+                configuration: .init(projectID: UUID(), projectRoot: root, profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil, capabilityRoot: support),
+                makeClient: { _ in
+                    ScriptedClient(script: [
+                        .toolCallStart(index: 0, id: "command", name: "run_development_command", kind: .function),
+                        .toolCallDelta(index: 0, arguments: "{\"arguments\":[\"/usr/bin/touch\",\"marker\"]}"),
+                        .finished(usage: nil), .content("done"), .finished(usage: nil)
+                    ])
+                }
+            )
+            var events: [String] = []
+            runtime.onNotification = { method, _ in events.append(method) }
+            let thread = try await runtime.request(method: "thread/start", params: ["agentMode": mode.rawValue])
+            let id = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+            _ = try await runtime.request(method: "turn/start", params: ["threadId": id, "input": [["type": "text", "text": "run"]]])
+            await waitUntil { events.contains("turn/completed") || events.contains("error") }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     func testPlanWriterRejectsSymlinkedPlanTarget() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

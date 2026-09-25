@@ -2,11 +2,12 @@ import AppKit
 
 /// Keeps both sidebar views alive so switching preserves file selection and scroll position.
 @MainActor final class ProjectSidebarView: NSVisualEffectView {
-    enum Mode { case files, todos, plans, agentContext }
+    enum Mode { case files, todos, plans, agentContext, permissions }
     private let files = NSScrollView()
     private let todos: ProjectTodosView
     private let agentContextSidebar: NSView
     private let plansSidebar: NSView
+    private let permissionsSidebar: NSView
     private let heading = NSTextField(labelWithString: "Files")
     private var selector = NSSegmentedControl()
     var onViewChanged: ((Mode) -> Void)?
@@ -19,10 +20,11 @@ import AppKit
     private(set) var mode: Mode = .files
     var showsTodos: Bool { mode == .todos }
 
-    init(outline: NSOutlineView, projectURL: URL, agentContextSidebar: NSView, plansSidebar: NSView) {
+    init(outline: NSOutlineView, projectURL: URL, agentContextSidebar: NSView, plansSidebar: NSView, permissionsSidebar: NSView) {
         todos = ProjectTodosView(projectURL: projectURL)
         self.agentContextSidebar = agentContextSidebar
         self.plansSidebar = plansSidebar
+        self.permissionsSidebar = permissionsSidebar
         super.init(frame: .zero)
         material = .sidebar
         blendingMode = .behindWindow
@@ -33,7 +35,8 @@ import AppKit
                 NSImage(systemSymbolName: "folder", accessibilityDescription: "Files")!,
                 NSImage(systemSymbolName: "checklist", accessibilityDescription: "TODOs")!,
                 NSImage(systemSymbolName: "list.bullet.rectangle", accessibilityDescription: "Plans")!,
-                NSImage(systemSymbolName: "person.crop.rectangle", accessibilityDescription: "Agent Context")!
+                NSImage(systemSymbolName: "person.crop.rectangle", accessibilityDescription: "Agent Context")!,
+                NSImage(systemSymbolName: "lock.shield", accessibilityDescription: "Permissions")!
             ],
             trackingMode: .selectOne, target: self, action: #selector(switchView(_:))
         )
@@ -43,10 +46,12 @@ import AppKit
         selector.setToolTip("TODOs", forSegment: 1)
         selector.setToolTip("Plans", forSegment: 2)
         selector.setToolTip("Agent Context", forSegment: 3)
+        selector.setToolTip("Permissions", forSegment: 4)
         selector.setWidth(38, forSegment: 0)
         selector.setWidth(38, forSegment: 1)
         selector.setWidth(38, forSegment: 2)
         selector.setWidth(38, forSegment: 3)
+        selector.setWidth(38, forSegment: 4)
         selector.setAccessibilityLabel("Sidebar view")
         heading.font = .systemFont(ofSize: 12, weight: .semibold)
         heading.textColor = .secondaryLabelColor
@@ -59,18 +64,19 @@ import AppKit
         todos.isHidden = true
         agentContextSidebar.isHidden = true
         plansSidebar.isHidden = true
+        permissionsSidebar.isHidden = true
 
-        for view in [selector, heading, files, todos, plansSidebar, agentContextSidebar] {
+        for view in [selector, heading, files, todos, plansSidebar, agentContextSidebar, permissionsSidebar] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            selector.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            selector.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
             selector.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             heading.topAnchor.constraint(equalTo: selector.bottomAnchor, constant: 14),
             heading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14)
         ])
-        for view in [files, todos, plansSidebar, agentContextSidebar] {
+        for view in [files, todos, plansSidebar, agentContextSidebar, permissionsSidebar] {
             NSLayoutConstraint.activate([
                 view.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 8),
                 view.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
@@ -122,7 +128,8 @@ import AppKit
         todos.isHidden = nextMode != .todos
         agentContextSidebar.isHidden = nextMode != .agentContext
         plansSidebar.isHidden = nextMode != .plans
-        heading.stringValue = switch nextMode { case .files: "Files"; case .todos: "TODOs"; case .plans: "Plans"; case .agentContext: "Agent Context" }
+        permissionsSidebar.isHidden = nextMode != .permissions
+        heading.stringValue = switch nextMode { case .files: "Files"; case .todos: "TODOs"; case .plans: "Plans"; case .agentContext: "Agent Context"; case .permissions: "Permissions" }
         if nextMode == .todos { todos.reload() }
         onViewChanged?(nextMode)
     }
@@ -136,10 +143,10 @@ import AppKit
     }
 
     private func modeForSegment(_ segment: Int) -> Mode {
-        switch segment { case 1: .todos; case 2: .plans; case 3: .agentContext; default: .files }
+        switch segment { case 1: .todos; case 2: .plans; case 3: .agentContext; case 4: .permissions; default: .files }
     }
 
     private func segment(for mode: Mode) -> Int {
-        switch mode { case .files: 0; case .todos: 1; case .plans: 2; case .agentContext: 3 }
+        switch mode { case .files: 0; case .todos: 1; case .plans: 2; case .agentContext: 3; case .permissions: 4 }
     }
 }

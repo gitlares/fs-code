@@ -87,7 +87,7 @@ final class NativeProviderConnection {
         struct Level: Decodable { let effort: String }
         struct Model: Decodable {
             let slug: String; let display_name: String?; let default_reasoning_level: String?
-            let supported_reasoning_levels: [Level]?; let visibility: String?; let context_window: Int?
+            let supported_reasoning_levels: [Level]?; let visibility: String?; let context_window: Int?; let max_context_window: Int?
         }
         struct Catalog: Decodable { let models: [Model] }
         struct APIModel: Decodable { let id: String }
@@ -103,7 +103,9 @@ final class NativeProviderConnection {
                         .filter { ReasoningConfig.Effort(rawValue: $0) != nil }
                     return ConnectionModel(id: model.slug, displayName: model.display_name ?? model.slug,
                         isDefault: false, supportedReasoningEfforts: efforts,
-                        defaultReasoningEffort: model.default_reasoning_level.flatMap { efforts.contains($0) ? $0 : nil })
+                        defaultReasoningEffort: model.default_reasoning_level.flatMap { efforts.contains($0) ? $0 : nil },
+                        defaultContextWindow: model.context_window,
+                        maximumContextWindow: model.max_context_window)
                 }
         } else {
             models = try JSONDecoder().decode(APIList.self, from: data).data.filter {

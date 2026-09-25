@@ -75,9 +75,9 @@ import XCTest
         let unsafeRange = string.range(of: "unsafe")
         XCTAssertNil(rendered.attribute(.link, at: unsafeRange.location, effectiveRange: nil))
         let pathRange = string.range(of: "Sources/FSCode/App.swift")
-        XCTAssertEqual(rendered.attribute(.foregroundColor, at: pathRange.location, effectiveRange: nil) as? NSColor, NSColor.systemIndigo)
+        XCTAssertEqual(rendered.attribute(.foregroundColor, at: pathRange.location, effectiveRange: nil) as? NSColor, NSColor.linkColor)
         let fencedPathRange = string.range(of: "/tmp/log.txt")
-        XCTAssertEqual(rendered.attribute(.foregroundColor, at: fencedPathRange.location, effectiveRange: nil) as? NSColor, NSColor.systemIndigo)
+        XCTAssertEqual(rendered.attribute(.foregroundColor, at: fencedPathRange.location, effectiveRange: nil) as? NSColor, NSColor.linkColor)
     }
 
     func testAssistantRenderingSeparatesTablesAndReplacesOpaqueCitationsOnly() throws {

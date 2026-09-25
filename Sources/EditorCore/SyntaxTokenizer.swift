@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SyntaxTokenKind: Sendable, Equatable {
+public enum SyntaxTokenKind: Sendable, Equatable, Hashable {
     case keyword
     case string
     case comment

@@ -25,7 +25,8 @@ import XCTest
 
     private func splits(_ workspace: WorkspaceWindow) throws -> (NSSplitViewController, NSSplitViewController) {
         let workspaceSplit = try XCTUnwrap(workspace.window.contentViewController as? NSSplitViewController)
-        let editorSplit = try XCTUnwrap(workspaceSplit.splitViewItems[1].viewController as? NSSplitViewController)
+        let center = workspaceSplit.splitViewItems[1].viewController
+        let editorSplit = try XCTUnwrap(center.children.first as? NSSplitViewController)
         return (workspaceSplit, editorSplit)
     }
 
@@ -121,5 +122,16 @@ import XCTest
         let (reopenedSplit, _) = try splits(reopened)
         XCTAssertEqual(reopenedSplit.splitView.arrangedSubviews[2].frame.width, 520, accuracy: 1)
         XCTAssertGreaterThanOrEqual(reopenedSplit.splitView.arrangedSubviews[1].frame.width, 340)
+
+        reopened.saveLayout()
+        let reopenedAgain = WorkspaceWindow(
+            project: Project(id: UUID(), name: "Layout Test", path: folder.path),
+            url: folder,
+            launchesTerminal: false
+        )
+        defer { reopenedAgain.window.close() }
+        await settle(reopenedAgain)
+        let (againSplit, _) = try splits(reopenedAgain)
+        XCTAssertEqual(againSplit.splitView.arrangedSubviews[2].frame.width, 520, accuracy: 1)
     }
 }

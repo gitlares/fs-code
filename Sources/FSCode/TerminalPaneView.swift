@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import EditorCore
 import SwiftTerm
 
 /// A single, project-scoped terminal session. The owner decides when it starts
@@ -20,16 +21,29 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
     private var didExit = false
     private var isShuttingDown = false
     private var shellIntegration: ShellIntegration?
+    private let themeStore = EditorThemeStore.shared
+    private var themeObserver: NSObjectProtocol?
 
     init(projectURL: URL) {
         self.projectURL = projectURL.standardizedFileURL
         terminal = Self.makeTerminal()
         super.init(frame: .zero)
+        themeObserver = NotificationCenter.default.addObserver(
+            forName: .editorThemeDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.applyPalette() }
+        }
         setupView()
         applyPalette()
     }
 
     required init?(coder: NSCoder) { nil }
+
+    isolated deinit {
+        if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) }
+    }
 
     var isTerminalFocused: Bool {
         guard let responder = window?.firstResponder else { return false }
@@ -242,15 +256,17 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
     }
 
     private func applyPalette() {
-        let palette = EditorPalette(appearance: effectiveAppearance)
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let ansi = Self.ansiColors(dark: dark).map(Self.terminalColor)
-        layer?.backgroundColor = palette.background.cgColor
+        let palette = EditorPalette(theme: themeStore.activeTheme(forDarkAppearance: dark))
+        let ansi = palette.ansiColors.map(Self.terminalColor)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = palette.background.cgColor
+        }
         terminal.nativeBackgroundColor = palette.background
         terminal.nativeForegroundColor = palette.foreground
-        terminal.caretColor = palette.purple
+        terminal.caretColor = palette.cursor
         terminal.caretTextColor = palette.background
-        terminal.selectedTextBackgroundColor = palette.selection
+        terminal.selectedTextBackgroundColor = .selectedTextBackgroundColor
         terminal.selectedTextForegroundColor = palette.foreground
         terminal.installColors(ansi)
     }

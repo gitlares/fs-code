@@ -49,6 +49,8 @@ public struct ConnectionModel: Codable, Hashable, Identifiable, Sendable {
     public let isDefault: Bool
     public let supportedReasoningEfforts: [String]
     public let defaultReasoningEffort: String?
+    public let defaultContextWindow: Int?
+    public let maximumContextWindow: Int?
 
     public init(
         id: String,
@@ -56,7 +58,9 @@ public struct ConnectionModel: Codable, Hashable, Identifiable, Sendable {
         displayName: String,
         isDefault: Bool,
         supportedReasoningEfforts: [String] = [],
-        defaultReasoningEffort: String? = nil
+        defaultReasoningEffort: String? = nil,
+        defaultContextWindow: Int? = nil,
+        maximumContextWindow: Int? = nil
     ) {
         self.id = id
         self.catalogID = catalogID ?? id
@@ -64,6 +68,8 @@ public struct ConnectionModel: Codable, Hashable, Identifiable, Sendable {
         self.isDefault = isDefault
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.defaultReasoningEffort = defaultReasoningEffort
+        self.defaultContextWindow = defaultContextWindow
+        self.maximumContextWindow = maximumContextWindow
     }
 }
 

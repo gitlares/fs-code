@@ -176,14 +176,50 @@ final class PlanEditorView: NSView, NSOutlineViewDataSource, NSOutlineViewDelega
         let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? NSTableCellView()
         cell.identifier = id
         if cell.textField == nil {
+            let statusImage = NSImageView()
+            statusImage.identifier = NSUserInterfaceItemIdentifier("plan-status")
+            statusImage.translatesAutoresizingMaskIntoConstraints = false
+            statusImage.imageScaling = .scaleProportionallyDown
             let label = NSTextField(labelWithString: "")
             label.translatesAutoresizingMaskIntoConstraints = false
             label.lineBreakMode = .byTruncatingTail
-            cell.addSubview(label); cell.textField = label
-            NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4), label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+            cell.addSubview(statusImage)
+            cell.addSubview(label)
+            cell.textField = label
+            NSLayoutConstraint.activate([
+                statusImage.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                statusImage.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                statusImage.widthAnchor.constraint(equalToConstant: 14),
+                statusImage.heightAnchor.constraint(equalToConstant: 14),
+                label.leadingAnchor.constraint(equalTo: statusImage.trailingAnchor, constant: 6),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
         }
-        cell.textField?.stringValue = "\(plan.status.rawValue.replacingOccurrences(of: "_", with: " ").capitalized) · \(plan.title)"
+        let statusImage = cell.subviews.first {
+            $0.identifier == NSUserInterfaceItemIdentifier("plan-status")
+        } as? NSImageView
+        let presentation = planStatusPresentation(plan.status)
+        statusImage?.image = NSImage(systemSymbolName: presentation.symbol, accessibilityDescription: presentation.accessibilityLabel)
+        statusImage?.contentTintColor = presentation.color
+        statusImage?.setAccessibilityLabel(presentation.accessibilityLabel)
+        cell.textField?.stringValue = plan.title
         return cell
+    }
+
+    private func planStatusPresentation(_ status: ProjectPlanStatus) -> (symbol: String, color: NSColor, accessibilityLabel: String) {
+        switch status {
+        case .done:
+            ("checkmark.circle.fill", .systemGreen, "Done")
+        case .inProgress:
+            ("circle.dotted", .controlAccentColor, "In progress")
+        case .abandoned:
+            ("exclamationmark.triangle.fill", .systemOrange, "Abandoned")
+        case .approved:
+            ("checkmark.circle", .controlAccentColor, "Approved")
+        case .draft:
+            ("circle", .tertiaryLabelColor, "Draft")
+        }
     }
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !restoringSelection else { return }
