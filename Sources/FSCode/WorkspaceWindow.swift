@@ -685,6 +685,14 @@ import AgentConnectionCore
         }
     }
 
+    private static func displayName(for capability: ProjectCapability) -> String {
+        switch capability {
+        case .developmentCommands: return "Terminal"
+        case .computerUse: return "Computer Use"
+        case .codeIntelligence: return "Code Intelligence"
+        }
+    }
+
     private func confirmCapability(_ capability: ProjectCapability, reason: String) async -> Bool {
         await withTaskCancellationHandler(operation: {
             await withCheckedContinuation { continuation in
@@ -693,7 +701,7 @@ import AgentConnectionCore
                     return
                 }
                 let alert = NSAlert()
-                alert.messageText = "Allow \(capability == .computerUse ? "Computer Use" : "Terminal") in \(window.title)?"
+                alert.messageText = "Allow \(Self.displayName(for: capability)) in \(window.title)?"
                 alert.informativeText = "\(reason)\n\nThis is enabled for agents in this project. Commands run with your macOS account access; Computer Use can interact with other apps."
                 alert.addButton(withTitle: "Allow")
                 alert.addButton(withTitle: "Cancel")

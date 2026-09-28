@@ -3,8 +3,12 @@ import Foundation
 
 actor NativeProjectTools {
     let rootURL: URL
-    init(rootURL: URL) { self.rootURL = rootURL }
-    func execute(name: String, arguments: [String: String], mode: AgentMode = .ask, selectedPlanID: String? = nil) -> String {
+    private let commandRunner: ProjectCommandRunner
+    init(rootURL: URL, commandRunner: ProjectCommandRunner) {
+        self.rootURL = rootURL
+        self.commandRunner = commandRunner
+    }
+    func execute(name: String, arguments: [String: String], mode: AgentMode = .ask, selectedPlanID: String? = nil) async -> String {
         switch name {
         case "read_project_file":
             guard let path = arguments["relative_path"], let url = projectFile(path) else { return "Path is outside the project." }
@@ -14,17 +18,11 @@ actor NativeProjectTools {
             return projectFiles().joined(separator: "\n")
         case "search_project_text":
             guard let query = arguments["query"], !query.isEmpty, query.utf8.count <= 512 else { return "Search query was invalid." }
-            var matches: [String] = []
-            for path in projectFiles() {
-                if Task.isCancelled { return "Cancelled." }
-                guard matches.count < 100, let url = projectFile(path),
-                      let text = readText(url) else { continue }
-                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() where String(line).localizedCaseInsensitiveContains(query) {
-                    matches.append("\(path):\(offset + 1): \(line.prefix(500))")
-                    if matches.count == 100 { break }
-                }
-            }
-            return matches.isEmpty ? "No matches." : matches.joined(separator: "\n")
+            if let ripgrepResult = await searchWithRipgrep(query: query) { return ripgrepResult }
+            return searchLinearly(query: query)
+        case "search_code_pattern":
+            guard let pattern = arguments["pattern"], !pattern.isEmpty, pattern.utf8.count <= 512 else { return "Pattern was invalid." }
+            return await searchWithAstGrep(pattern: pattern, language: arguments["language"])
         case "fs_write_plan":
             guard mode == .plan,
                   let path = arguments["relative_path"],
@@ -53,6 +51,72 @@ actor NativeProjectTools {
         default:
             return "Tool unavailable in this project."
         }
+    }
+
+    /// Best-effort: `rg` gives real regex/gitignore-aware search over the whole tree, not just the
+    /// first 500 files. Falls back to the linear scan when `rg` is missing or errors.
+    private func searchWithRipgrep(query: String) async -> String? {
+        let arguments = ["rg", "-i", "-F", "--line-number", "--no-heading", "--color=never", "--max-columns=500", "--", query, "."]
+        guard let result = try? await commandRunner.run(arguments: arguments, timeout: 10, maxOutputBytes: 65_536) else { return nil }
+        switch result.exitCode {
+        case 0:
+            let lines = result.output.split(separator: "\n", omittingEmptySubsequences: true).prefix(100)
+            return lines.isEmpty ? "No matches." : lines.joined(separator: "\n")
+        case 1:
+            return "No matches."
+        default:
+            return nil
+        }
+    }
+
+    /// ast-grep gives structural (AST-aware) matching. Unlike `rg`, a missing binary has no safe
+    /// textual fallback — pattern syntax is not valid regex — so we return an explicit message
+    /// instead of silently degrading to search_project_text.
+    private func searchWithAstGrep(pattern: String, language: String?) async -> String {
+        var arguments = ["ast-grep", "run", "--pattern", pattern, "--color=never", "--json=compact"]
+        if let language, !language.isEmpty { arguments += ["--lang", language] }
+        arguments.append(".")
+        guard let result = try? await commandRunner.run(arguments: arguments, timeout: 10, maxOutputBytes: 65_536) else {
+            return "ast-grep is not installed or could not run. Install it (e.g. `brew install ast-grep`) or use search_project_text for a plain-text search."
+        }
+        guard result.exitCode == 0 else {
+            return result.output.isEmpty ? "No matches." : "ast-grep reported an error:\n\(result.output.prefix(2_000))"
+        }
+        return Self.formatAstGrepMatches(result.output)
+    }
+
+    private static func formatAstGrepMatches(_ jsonOutput: String) -> String {
+        guard let data = jsonOutput.data(using: .utf8),
+              let matches = try? JSONDecoder().decode([AstGrepMatch].self, from: data), !matches.isEmpty else {
+            return "No matches."
+        }
+        let lines = matches.prefix(100).map { match -> String in
+            let snippet = match.lines.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? match.lines
+            return "\(match.file):\(match.range.start.line + 1): \(snippet.prefix(300))"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private struct AstGrepMatch: Decodable {
+        let file: String
+        let lines: String
+        let range: Range
+        struct Range: Decodable { let start: Position }
+        struct Position: Decodable { let line: Int }
+    }
+
+    private func searchLinearly(query: String) -> String {
+        var matches: [String] = []
+        for path in projectFiles() {
+            if Task.isCancelled { return "Cancelled." }
+            guard matches.count < 100, let url = projectFile(path),
+                  let text = readText(url) else { continue }
+            for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() where String(line).localizedCaseInsensitiveContains(query) {
+                matches.append("\(path):\(offset + 1): \(line.prefix(500))")
+                if matches.count == 100 { break }
+            }
+        }
+        return matches.isEmpty ? "No matches." : matches.joined(separator: "\n")
     }
 
     private func isDraftPlanPath(_ path: String) -> Bool {

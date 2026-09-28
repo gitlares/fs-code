@@ -4,6 +4,7 @@ import Foundation
 public enum ProjectCapability: String, Codable, CaseIterable, Sendable {
     case developmentCommands
     case computerUse
+    case codeIntelligence
 }
 
 public struct ProjectCapabilityRequest: Sendable, Equatable {

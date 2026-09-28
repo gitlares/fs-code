@@ -24,6 +24,26 @@ final class ProjectCapabilityStoreTests: XCTestCase {
         XCTAssertFalse(revoked)
     }
 
+    func testCodeIntelligenceCapabilityIsIndependentFromOtherCapabilities() async throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let project = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: support); try? FileManager.default.removeItem(at: project) }
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let store = ProjectCapabilityStore(projectURL: project, applicationSupportURL: support)
+        let initiallyEnabled = await store.isEnabled(.codeIntelligence)
+        XCTAssertFalse(initiallyEnabled)
+        try await store.setEnabled(.codeIntelligence, enabled: true)
+        let codeIntelligenceEnabled = await store.isEnabled(.codeIntelligence)
+        let developmentCommandsEnabled = await store.isEnabled(.developmentCommands)
+        let computerUseEnabled = await store.isEnabled(.computerUse)
+        XCTAssertTrue(codeIntelligenceEnabled)
+        XCTAssertFalse(developmentCommandsEnabled)
+        XCTAssertFalse(computerUseEnabled)
+        try await store.setEnabled(.codeIntelligence, enabled: false)
+        let revoked = await store.isEnabled(.codeIntelligence)
+        XCTAssertFalse(revoked)
+    }
+
     func testRunnerUsesProjectDirectoryAndBoundsOutput() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

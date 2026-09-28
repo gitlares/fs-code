@@ -513,6 +513,52 @@ public actor AgentFileChangeService {
         return record
     }
 
+    /// Imports a write that already happened outside `stageEdit`/`applyApproved` — e.g. one made
+    /// by `run_development_command` — into the same audited journal. Unlike `applyApproved`, the
+    /// file is not written here: the preflight check confirms the *after* content, not the
+    /// *before* content, since by the time this is called the write has already occurred.
+    public func recordCommandWrite(
+        relativePath: String,
+        beforeText: String?,
+        afterText: String,
+        threadID: String,
+        turnID: String
+    ) throws -> AgentFileChangeRecord {
+        guard !threadID.isEmpty, !turnID.isEmpty else { throw AgentFileChangeError.proposalUnavailable }
+        try validateText(afterText)
+        if let beforeText, beforeText == afterText { throw AgentFileChangeError.noChanges }
+
+        let target = try validatedTarget(for: relativePath, allowMissingTarget: true)
+        let afterHash = Self.sha256(afterText)
+        guard try currentText(for: target).map(Self.sha256) == afterHash else {
+            throw AgentFileChangeError.externalChange
+        }
+        let beforeHash = beforeText.map(Self.sha256)
+        let id = UUID()
+        let now = Date()
+        let changeHunks = Self.makeChangeHunks(recordID: id, relativePath: relativePath, before: beforeText, after: afterText)
+        let record = AgentFileChangeRecord(
+            id: id,
+            relativePath: relativePath,
+            operation: beforeText == nil ? .create : .replace,
+            beforeText: beforeText,
+            afterText: afterText,
+            beforeSHA256: beforeHash,
+            afterSHA256: afterHash,
+            diff: Self.unifiedDiff(path: relativePath, before: beforeText, after: afterText),
+            createdAt: now,
+            threadID: threadID,
+            turnID: turnID,
+            status: .applied,
+            appliedAt: now,
+            revertedAt: nil,
+            changeHunks: changeHunks,
+            pendingHunkRevert: nil
+        )
+        try persist(record)
+        return record
+    }
+
     public func history(relativePath: String? = nil) throws -> [AgentFileChangeRecord] {
         if let relativePath {
             _ = try validatedRelativePathComponents(relativePath)

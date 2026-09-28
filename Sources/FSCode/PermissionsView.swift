@@ -7,6 +7,7 @@ final class PermissionsView: NSView {
     private let store: ProjectCapabilityStore
     private let terminal = NSButton(checkboxWithTitle: "Terminal", target: nil, action: nil)
     private let computerUse = NSButton(checkboxWithTitle: "Computer Use", target: nil, action: nil)
+    private let codeIntelligence = NSButton(checkboxWithTitle: "Code Intelligence", target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "")
     private let accessibility = NSTextField(wrappingLabelWithString: "")
 
@@ -23,6 +24,7 @@ final class PermissionsView: NSView {
             guard let self else { return }
             terminal.state = await store.isEnabled(.developmentCommands) ? .on : .off
             computerUse.state = await store.isEnabled(.computerUse) ? .on : .off
+            codeIntelligence.state = await store.isEnabled(.codeIntelligence) ? .on : .off
             updateAccessibilityStatus()
             status.stringValue = ""
         }
@@ -46,6 +48,9 @@ final class PermissionsView: NSView {
         computerUse.target = self
         computerUse.action = #selector(changeCapability)
         computerUse.setAccessibilityLabel("Allow Computer Use for this project")
+        codeIntelligence.target = self
+        codeIntelligence.action = #selector(changeCapability)
+        codeIntelligence.setAccessibilityLabel("Allow Code Intelligence for this project")
 
         let requestAccessibility = NSButton(title: "Open Accessibility Settings…", target: self, action: #selector(requestAccessibilityPermission))
         requestAccessibility.controlSize = .small
@@ -55,7 +60,7 @@ final class PermissionsView: NSView {
         status.textColor = .systemRed
         status.maximumNumberOfLines = 0
 
-        let stack = NSStackView(views: [description, readSearch, fileEdits, terminal, computerUse, accessibility, requestAccessibility, status])
+        let stack = NSStackView(views: [description, readSearch, fileEdits, terminal, computerUse, codeIntelligence, accessibility, requestAccessibility, status])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -84,7 +89,10 @@ final class PermissionsView: NSView {
     deinit { NotificationCenter.default.removeObserver(self) }
 
     @objc private func changeCapability(_ sender: NSButton) {
-        let capability: ProjectCapability = sender === terminal ? .developmentCommands : .computerUse
+        let capability: ProjectCapability
+        if sender === terminal { capability = .developmentCommands }
+        else if sender === computerUse { capability = .computerUse }
+        else { capability = .codeIntelligence }
         let requestedState = sender.state == .on
         sender.isEnabled = false
         Task { [weak self] in

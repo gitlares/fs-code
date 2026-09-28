@@ -402,13 +402,145 @@ final class NativeAgentRuntimeTests: XCTestCase {
         XCTAssertTrue(output.contains("missing-project-command"))
     }
 
+    func testSearchProjectTextFindsMatchAcrossFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "let needle = 42\n".write(to: root.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+        try "nothing here\n".write(to: root.appendingPathComponent("b.swift"), atomically: true, encoding: .utf8)
+        let tools = NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root))
+        let result = await tools.execute(name: "search_project_text", arguments: ["query": "NEEDLE"], mode: .ask)
+        XCTAssertTrue(result.contains("a.swift"), "expected a match in a.swift, got: \(result)")
+        XCTAssertFalse(result.contains("b.swift"))
+    }
+
+    func testSearchProjectTextReportsNoMatches() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "nothing here\n".write(to: root.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+        let tools = NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root))
+        let result = await tools.execute(name: "search_project_text", arguments: ["query": "absent-token"], mode: .ask)
+        XCTAssertEqual(result, "No matches.")
+    }
+
+    func testRunDevelopmentCommandWritesAreAuditedNotBypassed() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: support)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "before\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try await ProjectCapabilityStore(projectURL: root, applicationSupportURL: support)
+            .setEnabled(.developmentCommands, enabled: true)
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: UUID(), projectRoot: root, profileID: UUID(), sessionID: UUID(), modelID: "test", effort: nil, capabilityRoot: support),
+            makeClient: { _ in
+                ScriptedClient(script: [
+                    .toolCallStart(index: 0, id: "command", name: "run_development_command", kind: .function),
+                    .toolCallDelta(index: 0, arguments: "{\"arguments\":[\"/bin/sh\",\"-c\",\"printf after > a.txt\"]}"),
+                    .finished(usage: nil), .content("done"), .finished(usage: nil)
+                ])
+            }
+        )
+        var events: [String] = []
+        runtime.onNotification = { method, _ in events.append(method) }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "run it"]]])
+        for _ in 0..<200 where !(events.contains("turn/completed") || events.contains("error")) {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(events.contains("turn/completed") || events.contains("error"), "events: \(events)")
+        // A fresh AgentFileChangeService instance reads the same on-disk journal: this proves the
+        // write landed in the audited journal, not just on disk unaudited.
+        let history = try await AgentFileChangeService(projectURL: root).history(relativePath: "a.txt")
+        XCTAssertEqual(history.count, 1, "expected the command's write to be recorded in the audited journal")
+        XCTAssertEqual(history.first?.status, .applied)
+        XCTAssertEqual(history.first?.beforeText, "before\n")
+        XCTAssertEqual(history.first?.afterText, "after")
+    }
+
+    func testFindSymbolDefinitionCapabilityGateBlocksWhenDisabled() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let history = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: history)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "func x() {}\n".write(to: root.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+        let projectID = UUID()
+        let profileID = UUID()
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: projectID, projectRoot: root, profileID: profileID, sessionID: UUID(), modelID: "test", effort: nil, historyRoot: history, capabilityRoot: support),
+            makeClient: { _ in
+                ScriptedClient(script: [
+                    .toolCallStart(index: 0, id: "symbol", name: "find_symbol_definition", kind: .function),
+                    .toolCallDelta(index: 0, arguments: "{\"relative_path\":\"a.swift\",\"line\":0,\"column\":5}"),
+                    .finished(usage: nil), .content("done"), .finished(usage: nil)
+                ])
+            }
+        )
+        var events: [String] = []
+        runtime.onNotification = { method, _ in events.append(method) }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "where is x defined"]]])
+        await waitUntil { events.contains("turn/completed") || events.contains("error") }
+        let messages = try XCTUnwrap(NativeAgentHistoryStore(projectID: projectID, profileID: profileID, rootOverride: history).load(threadID: threadID))
+        let toolMessage = messages.first { if case .tool(_, "find_symbol_definition", _) = $0 { return true } else { return false } }
+        guard case let .tool(_, _, content)? = toolMessage else { return XCTFail("Expected a find_symbol_definition tool message") }
+        XCTAssertTrue(content.contains("Code intelligence"), "expected the capability gate message, got: \(content)")
+        XCTAssertTrue(content.contains("disabled"))
+    }
+
+    func testSearchCodePatternFindsAMatch() async throws {
+        guard ProjectCommandRunner.resolveExecutable("ast-grep") != nil else {
+            throw XCTSkip("ast-grep is not installed on this machine.")
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "func needleFunction() {\n}\n".write(to: root.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+        let tools = NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root))
+        let result = await tools.execute(name: "search_code_pattern", arguments: ["pattern": "func $NAME()", "language": "swift"])
+        XCTAssertTrue(result.contains("a.swift"), "expected a match in a.swift, got: \(result)")
+    }
+
+    func testSearchCodePatternMissingBinaryReturnsExplicitMessage() async throws {
+        guard ProjectCommandRunner.resolveExecutable("ast-grep") == nil else {
+            throw XCTSkip("ast-grep is installed on this machine; cannot exercise the missing-binary path.")
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let tools = NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root))
+        let result = await tools.execute(name: "search_code_pattern", arguments: ["pattern": "func $NAME()"])
+        XCTAssertTrue(result.contains("ast-grep is not installed"), "expected explicit missing-binary message, got: \(result)")
+    }
+
+    func testSearchCodePatternRejectsOversizedPattern() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let tools = NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root))
+        let oversized = String(repeating: "a", count: 513)
+        let result = await tools.execute(name: "search_code_pattern", arguments: ["pattern": oversized])
+        XCTAssertEqual(result, "Pattern was invalid.")
+    }
+
     func testPlanWriterRejectsSymlinkedPlanTarget() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent(".fs/plans"), withIntermediateDirectories: true)
         let target = root.appendingPathComponent("outside.txt")
         try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(".fs/plans/p.md"), withDestinationURL: target)
-        let result = await NativeProjectTools(rootURL: root).execute(name: "fs_write_plan", arguments: ["relative_path":".fs/plans/p.md", "content":"---\nstatus: draft\napproved_via: none\n---\n"], mode: .plan)
+        let result = await NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root)).execute(name: "fs_write_plan", arguments: ["relative_path":".fs/plans/p.md", "content":"---\nstatus: draft\napproved_via: none\n---\n"], mode: .plan)
         XCTAssertFalse(result.hasPrefix("Saved"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
     }
@@ -422,7 +554,7 @@ final class NativeAgentRuntimeTests: XCTestCase {
         _ = try store.approve(planID: "selected")
         let plan = try store.read(planID: "selected")
         let update = plan.markdown.replacingOccurrences(of: "status: approved", with: "status: in_progress")
-        let tools = NativeProjectTools(rootURL: root)
+        let tools = NativeProjectTools(rootURL: root, commandRunner: ProjectCommandRunner(projectURL: root))
         let accepted = await tools.execute(name: "fs_update_plan", arguments: ["plan_id":"selected", "expected_revision":"\(plan.metadata.revision)", "markdown":update], mode: .build, selectedPlanID: "selected")
         XCTAssertTrue(accepted.hasPrefix("Updated"))
         let denied = await tools.execute(name: "fs_update_plan", arguments: ["plan_id":"selected", "expected_revision":"\(plan.metadata.revision)", "markdown":update], mode: .ask, selectedPlanID: "selected")

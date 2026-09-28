@@ -62,6 +62,8 @@ final class NativeAgentRuntime: AgentEngine {
     private let historyStore: NativeAgentHistoryStore
     private let capabilities: ProjectCapabilityStore
     private let commandRunner: ProjectCommandRunner
+    private let symbolServer: SwiftSymbolServer
+    private let fileChangeService: AgentFileChangeService?
     private var threads: [String: [ChatMessage]] = [:]
     private var threadModes: [String: AgentMode] = [:]
     private var selectedPlans: [String: String] = [:]
@@ -77,11 +79,16 @@ final class NativeAgentRuntime: AgentEngine {
     ) {
         self.configuration = configuration
         self.makeClient = makeClient
-        projectTools = NativeProjectTools(rootURL: configuration.projectRoot)
+        let runner = ProjectCommandRunner(projectURL: configuration.projectRoot)
+        commandRunner = runner
+        projectTools = NativeProjectTools(rootURL: configuration.projectRoot, commandRunner: runner)
+        symbolServer = SwiftSymbolServer(projectRoot: configuration.projectRoot, commandRunner: runner)
+        // A separate instance from the one fs_edit_file's dynamicToolHandler uses — safe, since
+        // recordCommandWrite touches only the on-disk journal, never the in-memory staged dict.
+        fileChangeService = try? AgentFileChangeService(projectURL: configuration.projectRoot)
         self.dynamicToolHandler = dynamicToolHandler
         historyStore = NativeAgentHistoryStore(projectID: configuration.projectID, profileID: configuration.profileID, rootOverride: configuration.historyRoot)
         capabilities = ProjectCapabilityStore(projectURL: configuration.projectRoot, applicationSupportURL: configuration.capabilityRoot)
-        commandRunner = ProjectCommandRunner(projectURL: configuration.projectRoot)
     }
 
     var onNotification: NotificationHandler? {
@@ -92,6 +99,7 @@ final class NativeAgentRuntime: AgentEngine {
     func stop() {
         for (_, run) in runs { run.task?.cancel() }
         Task { await commandRunner.cancelAll() }
+        Task { await symbolServer.shutdown() }
         runs.removeAll()
     }
 
@@ -402,10 +410,12 @@ final class NativeAgentRuntime: AgentEngine {
             let timeout = min(max((arguments["timeout_seconds"] as? NSNumber)?.doubleValue ?? 120, 1), 1_800)
             let runID = UUID()
             emit("item/started", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "cwd": configuration.projectRoot.path]])
+            let writeSnapshot = CommandWriteAuditor.snapshot(projectRoot: configuration.projectRoot)
             do {
                 let result = try await commandRunner.run(arguments: values, runID: runID, timeout: timeout)
-                emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "originalCommand": result.originalArguments.joined(separator: " "), "effectiveCommand": result.effectiveArguments.joined(separator: " "), "rtkApplied": result.rtkApplied, "cwd": configuration.projectRoot.path, "status": result.exitCode == 0 ? "completed" : "failed", "exitCode": result.exitCode, "output": result.output]])
-                return "exit \(result.exitCode)\(result.timedOut ? " (timed out)" : "")\(result.outputWasTruncated ? " (output truncated)" : "")\(result.rtkApplied ? " (RTK applied)" : "")\n\(result.output)"
+                let audit = await CommandWriteAuditor.importChanges(before: writeSnapshot, projectRoot: configuration.projectRoot, changeService: fileChangeService, threadID: threadID, turnID: turnID)
+                emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "originalCommand": result.originalArguments.joined(separator: " "), "effectiveCommand": result.effectiveArguments.joined(separator: " "), "rtkApplied": result.rtkApplied, "cwd": configuration.projectRoot.path, "status": result.exitCode == 0 ? "completed" : "failed", "exitCode": result.exitCode, "output": result.output + audit.suffixText]])
+                return "exit \(result.exitCode)\(result.timedOut ? " (timed out)" : "")\(result.outputWasTruncated ? " (output truncated)" : "")\(result.rtkApplied ? " (RTK applied)" : "")\n\(result.output)\(audit.suffixText)"
             } catch {
                 let diagnostic = (error as? LocalizedError)?.errorDescription ?? "The development command could not be started."
                 let message = "The development command could not be started: \(diagnostic)"
@@ -431,6 +441,17 @@ final class NativeAgentRuntime: AgentEngine {
             ))
             return result.message
         }
+        if call.name == "find_symbol_definition" || call.name == "find_symbol_references" {
+            guard await capabilities.isEnabled(.codeIntelligence) else {
+                return "Code intelligence (sourcekit-lsp) is disabled for this project. Use request_project_capability or the Permissions view; the host must explicitly enable it."
+            }
+            guard let path = arguments["relative_path"] as? String,
+                  let line = (arguments["line"] as? NSNumber)?.intValue,
+                  let column = (arguments["column"] as? NSNumber)?.intValue else { return "Tool arguments were invalid." }
+            return call.name == "find_symbol_definition"
+                ? await symbolServer.findDefinition(relativePath: path, line: line, column: column)
+                : await symbolServer.findReferences(relativePath: path, line: line, column: column)
+        }
         guard let textArguments = arguments as? [String: String] else { return "Tool arguments were invalid." }
         return await projectTools.execute(name: call.name, arguments: textArguments, mode: mode, selectedPlanID: selectedPlanID)
     }
@@ -438,7 +459,10 @@ final class NativeAgentRuntime: AgentEngine {
     private static let readToolDefinitions = [
         ToolDefinition(name: "read_project_file", description: "Read a UTF-8 project-relative file.", parametersSchema: .object(properties: ["relative_path": .string()], required: ["relative_path"])),
         ToolDefinition(name: "list_project_files", description: "List project-relative files.", parametersSchema: .object(properties: [:], required: [])),
-        ToolDefinition(name: "search_project_text", description: "Search UTF-8 project files.", parametersSchema: .object(properties: ["query": .string()], required: ["query"]))
+        ToolDefinition(name: "search_project_text", description: "Search UTF-8 project files.", parametersSchema: .object(properties: ["query": .string()], required: ["query"])),
+        ToolDefinition(name: "search_code_pattern", description: "Structural (AST-aware) code search using ast-grep pattern syntax (e.g. `$FUNC($$$ARGS)`), better than plain-text search for finding code shapes. Requires the ast-grep binary.", parametersSchema: .object(properties: ["pattern": .string(), "language": .string()], required: ["pattern"])),
+        ToolDefinition(name: "find_symbol_definition", description: "Find where the Swift symbol at a given file position is defined, using sourcekit-lsp. Line and column are 0-based. Requires the codeIntelligence project capability.", parametersSchema: .object(properties: ["relative_path": .string(), "line": .number(), "column": .number()], required: ["relative_path", "line", "column"])),
+        ToolDefinition(name: "find_symbol_references", description: "Find all references to the Swift symbol at a given file position, using sourcekit-lsp. Line and column are 0-based. Requires the codeIntelligence project capability.", parametersSchema: .object(properties: ["relative_path": .string(), "line": .number(), "column": .number()], required: ["relative_path", "line", "column"]))
     ]
 
     private static let buildToolDefinitions = readToolDefinitions + [
@@ -456,13 +480,13 @@ final class NativeAgentRuntime: AgentEngine {
         ], required: ["relative_path", "content"]))
     ]
 
-    private static let capabilityToolDefinition = ToolDefinition(name: "request_project_capability", description: "Ask the host to enable or disable exactly one project capability: developmentCommands or computerUse. Give a short user-facing reason. The host decides and persists the result outside the repository.", parametersSchema: .object(properties: ["capability": .string(), "enabled": .boolean(), "reason": .string()], required: ["capability", "enabled", "reason"]))
+    private static let capabilityToolDefinition = ToolDefinition(name: "request_project_capability", description: "Ask the host to enable or disable exactly one project capability: developmentCommands, computerUse, or codeIntelligence. Give a short user-facing reason. The host decides and persists the result outside the repository.", parametersSchema: .object(properties: ["capability": .string(), "enabled": .boolean(), "reason": .string()], required: ["capability", "enabled", "reason"]))
     private static func toolDefinitions(for mode: AgentMode) -> [ToolDefinition] {
         switch mode { case .ask: readToolDefinitions + [capabilityToolDefinition]; case .plan: planToolDefinitions + [capabilityToolDefinition]; case .build: buildToolDefinitions + [capabilityToolDefinition] }
     }
 
     private static func isPermitted(_ name: String, in mode: AgentMode) -> Bool {
-        let read = ["read_project_file", "list_project_files", "search_project_text"]
+        let read = ["read_project_file", "list_project_files", "search_project_text", "search_code_pattern", "find_symbol_definition", "find_symbol_references"]
         if read.contains(name) { return true }
         if name == "request_project_capability" { return true }
         switch mode { case .build: return name == "fs_edit_file" || name == "fs_update_plan" || name == "run_development_command" || name == "computer_use"; case .plan: return name == "fs_write_plan"; case .ask: return false }
