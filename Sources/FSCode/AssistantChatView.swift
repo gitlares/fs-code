@@ -606,12 +606,12 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             let percent = Int(min(100, max(0, (utilization * 100).rounded())))
             contextSelectorTitle = usesCompactFooterLayout == true ? "\(percent)%" : "Context \(percent)%"
             contextButton.image = contextIcon(utilization: utilization)
-            contextButton.toolTip = "Last request input context: \(usage.inputTokens) of \(usage.modelContextWindow ?? 0) tokens"
+            contextButton.toolTip = "Last request input context: \(usage.inputTokens) of \(usage.modelContextWindow ?? 0) tokens" + (usage.outputTokens.map { ", output: \($0)" } ?? "")
             contextButton.setAccessibilityValue("\(percent)%")
         } else if let usage = manager.lastRequestInputContext {
             contextSelectorTitle = usesCompactFooterLayout == true ? "—" : "Context —"
             contextButton.image = contextIcon(utilization: nil)
-            contextButton.toolTip = "Last request input: \(usage.inputTokens) tokens; provider window not reported"
+            contextButton.toolTip = "Last request input: \(usage.inputTokens) tokens; provider window not reported" + (usage.outputTokens.map { ", output: \($0)" } ?? "")
             contextButton.setAccessibilityValue("Window not reported")
         } else {
             contextSelectorTitle = usesCompactFooterLayout == true ? "—" : "Context —"
@@ -640,32 +640,25 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         configureEfforts(for: selectedModel)
         updateComposerState()
         configureQueue()
-        let hidesIdleStatus = localRecoveryMessage == nil &&
-            (manager.activity == .idle || manager.liveProgressText?.isEmpty == false)
-        statusRow.isHidden = hidesIdleStatus
-        if !hidesIdleStatus {
+        // Only a real error is worth a persistent banner above the transcript; the
+        // "thinking"/"responding" spinner belongs at the bottom, next to the reply
+        // it describes, not floating above the whole conversation.
+        let isError: Bool
+        if localRecoveryMessage != nil {
+            isError = true
+        } else if case .failed = manager.activity {
+            isError = true
+        } else {
+            isError = false
+        }
+        statusRow.isHidden = !isError
+        streamingIndicator.stopAnimation(nil)
+        if isError {
             statusLabel.stringValue = localRecoveryMessage ?? manager.activity.statusText
-            let isError: Bool
-            if localRecoveryMessage != nil {
-                isError = true
-            } else if case .failed = manager.activity {
-                isError = true
-            } else {
-                isError = false
-            }
-            let isStreaming: Bool
-            switch manager.activity {
-            case .starting, .responding, .stopping: isStreaming = !isError
-            case .idle, .failed: isStreaming = false
-            }
-            statusIcon.image = isError
-                ? NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Error")
-                : nil
+            statusIcon.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Error")
             statusIcon.contentTintColor = .systemRed
-            statusIcon.isHidden = !isError
+            statusIcon.isHidden = false
             statusLabel.textColor = .labelColor
-            if isStreaming { streamingIndicator.startAnimation(nil) }
-            else { streamingIndicator.stopAnimation(nil) }
         }
         refreshTranscript()
         revealPendingSubmissionIfNeeded()
@@ -1277,6 +1270,12 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             if let cached = usage.cacheWriteTokens {
                 menu.addItem(withTitle: "Cache write: \(cached) tokens", action: nil, keyEquivalent: "")
             }
+            if let output = usage.outputTokens {
+                menu.addItem(withTitle: "Output: \(output) tokens", action: nil, keyEquivalent: "")
+            }
+            if let total = usage.totalTokens {
+                menu.addItem(withTitle: "Total: \(total) tokens", action: nil, keyEquivalent: "")
+            }
         } else {
             menu.addItem(withTitle: "Last request input context is not reported", action: nil, keyEquivalent: "")
         }
@@ -1587,19 +1586,51 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
                 details.widthAnchor.constraint(equalTo: rowStack.widthAnchor, constant: -4).isActive = true
             }
         }
-        if row == renderedMessages.count - 1,
-           let progress = renderedLiveProgressText,
-           !progress.isEmpty,
-           let progressOwner = renderedLiveProgressUserMessageID,
-           renderedMessages.contains(where: { $0.id == progressOwner }) {
-            let thinking = NSTextField(wrappingLabelWithString: progress)
-            thinking.font = .systemFont(ofSize: 12)
-            thinking.textColor = .secondaryLabelColor
-            thinking.maximumNumberOfLines = 0
-            thinking.isSelectable = true
-            thinking.setAccessibilityLabel("Thinking")
-            rowStack.addArrangedSubview(thinking)
-            thinking.widthAnchor.constraint(equalTo: rowStack.widthAnchor, constant: -8).isActive = true
+        if row == renderedMessages.count - 1, localRecoveryMessage == nil {
+            let thinkingText: String?
+            switch manager.activity {
+            case .idle, .failed:
+                thinkingText = nil
+            case .starting, .responding, .stopping:
+                let progress = renderedLiveProgressText
+                // Once streamed assistant content is visible, its own bubble is the progress
+                // indicator. Keep the fallback spinner only while the turn has not produced an
+                // assistant message yet; otherwise it lingers below commentary/final output.
+                thinkingText = (progress?.isEmpty == false)
+                    ? progress
+                    : (renderedMessages.last?.role == .assistant ? nil : manager.activity.statusText)
+            }
+            if let thinkingText {
+                let spinner = NSProgressIndicator()
+                spinner.style = .spinning
+                spinner.controlSize = .small
+                spinner.isDisplayedWhenStopped = false
+                spinner.startAnimation(nil)
+                let thinking = NSTextField(wrappingLabelWithString: thinkingText)
+                thinking.font = .systemFont(ofSize: 12)
+                thinking.textColor = .secondaryLabelColor
+                thinking.maximumNumberOfLines = 0
+                thinking.isSelectable = true
+                thinking.alignment = .center
+                thinking.setAccessibilityLabel("Thinking")
+                let thinkingRow = NSStackView(views: [spinner, thinking])
+                thinkingRow.orientation = .horizontal
+                thinkingRow.alignment = .centerY
+                thinkingRow.spacing = 6
+                thinkingRow.translatesAutoresizingMaskIntoConstraints = false
+                let centering = NSView()
+                centering.translatesAutoresizingMaskIntoConstraints = false
+                centering.addSubview(thinkingRow)
+                NSLayoutConstraint.activate([
+                    thinkingRow.centerXAnchor.constraint(equalTo: centering.centerXAnchor),
+                    thinkingRow.topAnchor.constraint(equalTo: centering.topAnchor),
+                    thinkingRow.bottomAnchor.constraint(equalTo: centering.bottomAnchor),
+                    thinkingRow.leadingAnchor.constraint(greaterThanOrEqualTo: centering.leadingAnchor),
+                    thinkingRow.trailingAnchor.constraint(lessThanOrEqualTo: centering.trailingAnchor)
+                ])
+                rowStack.addArrangedSubview(centering)
+                centering.widthAnchor.constraint(equalTo: rowStack.widthAnchor, constant: -8).isActive = true
+            }
         }
         if message.role == .user,
            let summary = renderedActivities.first(where: { $0.userMessageID == message.id }),

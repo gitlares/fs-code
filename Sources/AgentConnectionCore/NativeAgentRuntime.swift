@@ -263,7 +263,7 @@ final class NativeAgentRuntime: AgentEngine {
                             lastTotalTokensByThread[threadID] = usage.total
                         }
                         if let usage, let window = client.contextWindowSize, window > 0 {
-                            var last: [String: Any] = ["inputTokens": usage.input]
+                            var last: [String: Any] = ["inputTokens": usage.input, "outputTokens": usage.output, "totalTokens": usage.total]
                             if let cacheRead = usage.cacheRead { last["cacheReadTokens"] = cacheRead }
                             if let cacheWrite = usage.cacheWrite { last["cacheWriteTokens"] = cacheWrite }
                             emit("thread/tokenUsage/updated", ["threadId": threadID, "turnId": turnID, "tokenUsage": ["last": last, "modelContextWindow": window]])

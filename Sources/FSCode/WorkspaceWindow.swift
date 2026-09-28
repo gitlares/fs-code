@@ -39,13 +39,26 @@ import AgentConnectionCore
     }
 }
 
+@MainActor final class ProjectOutlineView: NSOutlineView {
+    var onContextRow: ((Int) -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0, !selectedRowIndexes.contains(row) {
+            selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        return onContextRow?(row)
+    }
+}
+
 @MainActor final class WorkspaceWindow: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSToolbarDelegate, NSWindowDelegate {
     let window: NSWindow
     var onClose: (() -> Void)?
 
     private let root: FileNode
-    private let outline: NSOutlineView
+    private let outline: ProjectOutlineView
     private var synchronizingFileSelection = false
+    private var pendingClipboard: (urls: [URL], isCut: Bool)?
     private let textEditor = TextEditorView()
     private let contextStore: ContextStore
     private let agentContextView: AgentContextView
@@ -88,7 +101,7 @@ import AgentConnectionCore
 
     init(project: Project, url: URL, launchesTerminal: Bool = true) {
         let root = FileNode(url)
-        let outline = NSOutlineView()
+        let outline = ProjectOutlineView()
         let workspaceSplit = NSSplitViewController()
         let editorSplit = NSSplitViewController()
         let window = NSWindow(
@@ -469,6 +482,196 @@ import AgentConnectionCore
         outline.style = .sourceList
         outline.backgroundColor = .clear
         outline.registerForDraggedTypes([.fileURL])
+        outline.onContextRow = { [weak self] row in self?.buildFileContextMenu(forRow: row) }
+    }
+
+    // MARK: File tree context menu
+
+    private func selectedNode() -> FileNode? {
+        outline.item(atRow: outline.selectedRow) as? FileNode
+    }
+
+    private func containingDirectory(for node: FileNode?) -> URL {
+        guard let node else { return root.url }
+        return node.isDirectory ? node.url : node.url.deletingLastPathComponent()
+    }
+
+    private func buildFileContextMenu(forRow row: Int) -> NSMenu {
+        let node = row >= 0 ? selectedNode() : nil
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector, enabled: Bool = true) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = enabled
+        }
+        if let node, !node.isDirectory {
+            add("Open", #selector(openSelectedFile))
+            menu.addItem(.separator())
+        }
+        add("New File…", #selector(newFile))
+        add("New Folder…", #selector(newFolder))
+        if node != nil {
+            menu.addItem(.separator())
+            add("Reveal in Finder", #selector(revealSelectionInFinder))
+            menu.addItem(.separator())
+            add("Copy Path", #selector(copySelectionPath))
+            add("Copy Relative Path", #selector(copySelectionRelativePath))
+            menu.addItem(.separator())
+            add("Cut", #selector(cutSelection))
+            add("Copy", #selector(copySelection))
+        }
+        add("Paste", #selector(pasteClipboard), enabled: pendingClipboard != nil)
+        if node != nil {
+            menu.addItem(.separator())
+            add("Duplicate", #selector(duplicateSelection))
+            add("Rename…", #selector(renameSelection))
+            menu.addItem(.separator())
+            add("Move to Trash", #selector(trashSelection))
+        }
+        return menu
+    }
+
+    private func presentError(_ error: Error) {
+        NSAlert(error: error).beginSheetModal(for: window)
+    }
+
+    private func uniqueDestination(in directory: URL, forName name: String) -> URL {
+        var candidate = directory.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: candidate.path) else { return candidate }
+        let ext = (name as NSString).pathExtension
+        let base = ext.isEmpty ? name : String(name.dropLast(ext.count + 1))
+        var counter = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let nextName = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
+            candidate = directory.appendingPathComponent(nextName)
+            counter += 1
+        }
+        return candidate
+    }
+
+    private func promptForName(title: String, defaultValue: String, confirmTitle: String, completion: @escaping (String) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        let field = NSTextField(string: defaultValue)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: confirmTitle)
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            completion(name)
+        }
+    }
+
+    @objc private func newFile(_ sender: Any? = nil) {
+        let directory = containingDirectory(for: selectedNode())
+        promptForName(title: "New File", defaultValue: "untitled.txt", confirmTitle: "Create") { [weak self] name in
+            guard let self else { return }
+            let destination = self.uniqueDestination(in: directory, forName: name)
+            guard FileManager.default.createFile(atPath: destination.path, contents: Data()) else { return }
+            self.reloadProjectTree()
+            self.revealActiveFile(destination)
+        }
+    }
+
+    @objc private func newFolder(_ sender: Any? = nil) {
+        let directory = containingDirectory(for: selectedNode())
+        promptForName(title: "New Folder", defaultValue: "untitled folder", confirmTitle: "Create") { [weak self] name in
+            guard let self else { return }
+            let destination = self.uniqueDestination(in: directory, forName: name)
+            do {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                self.reloadProjectTree()
+            } catch { self.presentError(error) }
+        }
+    }
+
+    @objc private func revealSelectionInFinder(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([node.url])
+    }
+
+    @objc private func copySelectionPath(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(node.url.path, forType: .string)
+    }
+
+    @objc private func copySelectionRelativePath(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        let rootPath = root.url.standardizedFileURL.path
+        let fullPath = node.url.standardizedFileURL.path
+        let relative = fullPath.hasPrefix(rootPath) ? String(fullPath.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) : fullPath
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(relative, forType: .string)
+    }
+
+    @objc private func cutSelection(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        pendingClipboard = ([node.url], true)
+    }
+
+    @objc private func copySelection(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        pendingClipboard = ([node.url], false)
+    }
+
+    @objc private func pasteClipboard(_ sender: Any? = nil) {
+        guard let clipboard = pendingClipboard else { return }
+        let directory = containingDirectory(for: selectedNode())
+        for url in clipboard.urls {
+            let destination = uniqueDestination(in: directory, forName: url.lastPathComponent)
+            do {
+                if clipboard.isCut {
+                    try FileManager.default.moveItem(at: url, to: destination)
+                } else {
+                    try FileManager.default.copyItem(at: url, to: destination)
+                }
+            } catch { presentError(error) }
+        }
+        if clipboard.isCut { pendingClipboard = nil }
+        reloadProjectTree()
+    }
+
+    @objc private func duplicateSelection(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        let destination = uniqueDestination(in: node.url.deletingLastPathComponent(), forName: node.url.lastPathComponent)
+        do {
+            try FileManager.default.copyItem(at: node.url, to: destination)
+            reloadProjectTree()
+        } catch { presentError(error) }
+    }
+
+    @objc private func renameSelection(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        promptForName(title: "Rename \"\(node.url.lastPathComponent)\"", defaultValue: node.url.lastPathComponent, confirmTitle: "Rename") { [weak self] name in
+            guard let self, name != node.url.lastPathComponent else { return }
+            let destination = node.url.deletingLastPathComponent().appendingPathComponent(name)
+            do {
+                try FileManager.default.moveItem(at: node.url, to: destination)
+                self.reloadProjectTree()
+                self.revealActiveFile(destination)
+            } catch { self.presentError(error) }
+        }
+    }
+
+    @objc private func trashSelection(_ sender: Any? = nil) {
+        guard let node = selectedNode() else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Move \"\(node.url.lastPathComponent)\" to Trash?"
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            do {
+                try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
+                self.reloadProjectTree()
+            } catch { self.presentError(error) }
+        }
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {

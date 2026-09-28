@@ -8,13 +8,17 @@ public struct ConversationInputContextUsage: Codable, Sendable, Equatable {
     public let modelID: String?
     public let cacheReadTokens: Int?
     public let cacheWriteTokens: Int?
+    public let outputTokens: Int?
+    public let totalTokens: Int?
 
-    public init(inputTokens: Int, modelContextWindow: Int?, modelID: String?, cacheReadTokens: Int? = nil, cacheWriteTokens: Int? = nil) {
+    public init(inputTokens: Int, modelContextWindow: Int?, modelID: String?, cacheReadTokens: Int? = nil, cacheWriteTokens: Int? = nil, outputTokens: Int? = nil, totalTokens: Int? = nil) {
         self.inputTokens = inputTokens
         self.modelContextWindow = modelContextWindow
         self.modelID = modelID
         self.cacheReadTokens = cacheReadTokens
         self.cacheWriteTokens = cacheWriteTokens
+        self.outputTokens = outputTokens
+        self.totalTokens = totalTokens
     }
 
     public var utilization: Double? {

@@ -202,7 +202,20 @@ public actor ProjectCommandRunner {
               ["/usr/bin/git", "/bin/ls", "/opt/homebrew/bin/rg"].contains(executable) else {
             return (arguments, false)
         }
-        return ([rtkExecutablePath, URL(fileURLWithPath: executable).lastPathComponent] + Array(arguments.dropFirst()), true)
+        let rtkCommand = URL(fileURLWithPath: executable).lastPathComponent
+        // RTK resolves its delegated command through PATH. Homebrew's rg is commonly outside the
+        // environment inherited by a GUI app, so make the already-resolved executable directory
+        // available to RTK without changing the child command's argv or searching the project.
+        guard rtkCommand == "rg" else {
+            return ([rtkExecutablePath, rtkCommand] + Array(arguments.dropFirst()), true)
+        }
+        let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let executableDirectory = URL(fileURLWithPath: executable).deletingLastPathComponent().path
+        let pathEntries = [executableDirectory] + inheritedPath.split(separator: ":").map(String.init)
+        let path = pathEntries.reduce(into: [String]()) { entries, entry in
+            if !entry.isEmpty, !entries.contains(entry) { entries.append(entry) }
+        }.joined(separator: ":")
+        return (["/usr/bin/env", "PATH=\(path)", rtkExecutablePath, rtkCommand] + Array(arguments.dropFirst()), true)
     }
 
     private static func spawn(executable: String, arguments: [String], workingDirectory: String, outputFD: Int32) throws -> pid_t {

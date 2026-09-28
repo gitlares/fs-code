@@ -2024,7 +2024,9 @@ public final class AgentConversationManager {
             modelContextWindow: usage.modelContextWindow,
             modelID: modelID,
             cacheReadTokens: usage.cacheReadTokens,
-            cacheWriteTokens: usage.cacheWriteTokens
+            cacheWriteTokens: usage.cacheWriteTokens,
+            outputTokens: usage.outputTokens,
+            totalTokens: usage.totalTokens
         )
         document.conversations[index].inputContextUsage = modelBoundUsage
         lastRequestInputContext = modelBoundUsage
@@ -2149,7 +2151,7 @@ public final class AgentConversationManager {
         }
     }
 
-    private static func inputContextUsage(from params: [String: Any]) -> (inputTokens: Int, modelContextWindow: Int?, cacheReadTokens: Int?, cacheWriteTokens: Int?)? {
+    private static func inputContextUsage(from params: [String: Any]) -> (inputTokens: Int, modelContextWindow: Int?, cacheReadTokens: Int?, cacheWriteTokens: Int?, outputTokens: Int?, totalTokens: Int?)? {
         guard let tokenUsage = params["tokenUsage"] as? [String: Any],
               let last = tokenUsage["last"] as? [String: Any],
               let inputTokens = strictInteger(last["inputTokens"]), inputTokens >= 0 else {
@@ -2159,9 +2161,13 @@ public final class AgentConversationManager {
         guard modelContextWindow == nil || modelContextWindow! > 0 else { return nil }
         let cacheRead = strictInteger(last["cacheReadTokens"])
         let cacheWrite = strictInteger(last["cacheWriteTokens"])
+        let outputTokens = strictInteger(last["outputTokens"])
+        let totalTokens = strictInteger(last["totalTokens"])
         guard cacheRead == nil || cacheRead! >= 0,
-              cacheWrite == nil || cacheWrite! >= 0 else { return nil }
-        return (inputTokens, modelContextWindow, cacheRead, cacheWrite)
+              cacheWrite == nil || cacheWrite! >= 0,
+              outputTokens == nil || outputTokens! >= 0,
+              totalTokens == nil || totalTokens! >= 0 else { return nil }
+        return (inputTokens, modelContextWindow, cacheRead, cacheWrite, outputTokens, totalTokens)
     }
 
     private static func strictInteger(_ value: Any?) -> Int? {

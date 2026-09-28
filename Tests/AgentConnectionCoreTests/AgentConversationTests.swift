@@ -600,14 +600,18 @@ final class AgentConversationTests: XCTestCase {
         XCTAssertEqual(manager.lastRequestInputContext?.modelContextWindow, 128_000)
         XCTAssertNil(manager.lastRequestInputContext?.cacheReadTokens)
         XCTAssertNil(manager.lastRequestInputContext?.cacheWriteTokens)
+        XCTAssertNil(manager.lastRequestInputContext?.outputTokens)
+        XCTAssertNil(manager.lastRequestInputContext?.totalTokens)
 
         transport.emit(method: "thread/tokenUsage/updated", params: [
             "threadId": threadID,
             "turnId": turnID,
-            "tokenUsage": ["last": ["inputTokens": 1, "cacheReadTokens": 0, "cacheWriteTokens": 0], "modelContextWindow": 128_000]
+            "tokenUsage": ["last": ["inputTokens": 1, "cacheReadTokens": 0, "cacheWriteTokens": 0, "outputTokens": 2, "totalTokens": 3], "modelContextWindow": 128_000]
         ])
         XCTAssertEqual(manager.lastRequestInputContext?.cacheReadTokens, 0)
         XCTAssertEqual(manager.lastRequestInputContext?.cacheWriteTokens, 0)
+        XCTAssertEqual(manager.lastRequestInputContext?.outputTokens, 2)
+        XCTAssertEqual(manager.lastRequestInputContext?.totalTokens, 3)
 
         transport.emit(method: "thread/tokenUsage/updated", params: [
             "threadId": threadID,

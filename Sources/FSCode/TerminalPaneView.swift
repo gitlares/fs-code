@@ -171,9 +171,38 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
         )
     }
 
+    // MARK: Drag and drop
+
+    // SwiftTerm's TerminalView doesn't register for drags itself, so the file/image
+    // promise never reaches it. Registering here works anyway: AppKit walks up from
+    // the hit-tested subview to the nearest ancestor registered for the pasteboard
+    // type, same trick used by DropView in App.swift.
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty else { return false }
+        insertPaths(urls)
+        return true
+    }
+
+    private func insertPaths(_ urls: [URL]) {
+        guard terminal.process.running else { return }
+        let text = urls.map { Self.shellQuoted($0.path) }.joined(separator: " ") + " "
+        guard let data = text.data(using: .utf8) else { return }
+        terminal.process.send(data: Array(data)[...])
+        focusTerminal()
+    }
+
+    private static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     private func setupView() {
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
 
         header.material = .headerView
         header.blendingMode = .withinWindow
