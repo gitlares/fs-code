@@ -1,17 +1,18 @@
 import Foundation
 
-/// An opt-in policy for assembling PCM chunks into one stream with boundary-keyed pauses and click-safe fades.
+/// An opt-in policy for assembling PCM chunks into one stream with boundary-keyed pauses and join fades.
 public struct TTSStitchPolicy: Sendable, Equatable, Hashable, Codable {
     /// Soft character target the chunker fills toward before cutting at a sentence boundary,
     /// or nil to pack greedily to the provider maximum.
     public let targetCharacters: Int?
     /// Whether to extend past the target to cut on a paragraph boundary when one is in reach.
     public let preferParagraphBoundaries: Bool
-    /// Silence inserted where a chunk ends a sentence.
+    /// Minimum boundary quiet where a chunk ends a sentence.
     public let sentencePause: Duration
-    /// Silence inserted where a chunk ends a paragraph.
+    /// Minimum boundary quiet where a chunk ends a paragraph.
     public let paragraphPause: Duration
-    /// Edge fade applied into and out of each inserted pause to suppress clicks.
+    /// Edge fade applied at internal joins with non-quiet edges, using the full fade beside a positive
+    /// quiet budget and at most 1 ms at direct joins.
     public let joinFade: Duration
     /// Loudness matching applied across the assembled PCM chunks, or nil to leave levels untouched.
     public let loudness: TTSLoudnessMatch?
@@ -36,5 +37,56 @@ public struct TTSStitchPolicy: Sendable, Equatable, Hashable, Codable {
         self.paragraphPause = paragraphPause
         self.joinFade = joinFade
         self.loudness = loudness
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targetCharacters
+        case preferParagraphBoundaries
+        case sentencePause
+        case paragraphPause
+        case joinFade
+        case loudness
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let targetCharacters = try container.decodeIfPresent(Int.self, forKey: .targetCharacters)
+        let preferParagraphBoundaries = try container.decode(Bool.self, forKey: .preferParagraphBoundaries)
+        let sentencePause = try container.decode(Duration.self, forKey: .sentencePause)
+        let paragraphPause = try container.decode(Duration.self, forKey: .paragraphPause)
+        let joinFade = try container.decode(Duration.self, forKey: .joinFade)
+        let loudness = try container.decodeIfPresent(TTSLoudnessMatch.self, forKey: .loudness)
+        if let targetCharacters, targetCharacters < 1 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .targetCharacters, in: container,
+                debugDescription: "targetCharacters must be at least 1"
+            )
+        }
+        guard sentencePause >= .zero else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .sentencePause, in: container,
+                debugDescription: "sentencePause must not be negative"
+            )
+        }
+        guard paragraphPause >= .zero else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .paragraphPause, in: container,
+                debugDescription: "paragraphPause must not be negative"
+            )
+        }
+        guard joinFade >= .zero else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .joinFade, in: container,
+                debugDescription: "joinFade must not be negative"
+            )
+        }
+        self.init(
+            targetCharacters: targetCharacters,
+            preferParagraphBoundaries: preferParagraphBoundaries,
+            sentencePause: sentencePause,
+            paragraphPause: paragraphPause,
+            joinFade: joinFade,
+            loudness: loudness
+        )
     }
 }

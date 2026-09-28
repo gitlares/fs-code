@@ -1,6 +1,6 @@
 import Foundation
 
-/// A streamed chunk emitted by ``TTSClient/stream(text:voice:options:)``.
+/// A streamed chunk emitted by ``TTSClient/stream(text:voice:options:stitch:)``.
 public struct TTSSegment: Sendable, Equatable {
     public let chunk: TTSChunk
     public let encoding: TTSAudioEncoding

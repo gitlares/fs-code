@@ -71,6 +71,13 @@ final class NativeAgentRuntime: AgentEngine {
     private var runs: [String: Run] = [:]
     private var steeredMessageIDs = Set<String>()
     private var notificationHandler: NotificationHandler?
+    private var compactorsByThread: [String: ContextCompactor] = [:]
+    private var lastTotalTokensByThread: [String: Int] = [:]
+    private var totalUsageByThread: [String: TokenUsageTotals] = [:]
+    /// Proactively compact once a thread crosses 80% of the model's real context window (see
+    /// NativeProviderConnection, which now prefers max_context_window over the provider's
+    /// conservative default), leaving headroom for the response and this round's tool calls.
+    private static let contextCompactionConfiguration = AgentConfiguration(maxMessages: 400, compactionThreshold: 0.8)
 
     init(
         configuration: Configuration,
@@ -192,6 +199,24 @@ final class NativeAgentRuntime: AgentEngine {
                     modelID: run.modelID, effort: run.effort, historyRoot: configuration.historyRoot, capabilityRoot: configuration.capabilityRoot
                 )
                 let client = try await makeClient(requestConfiguration)
+                var totalUsage = totalUsageByThread[threadID] ?? TokenUsageTotals()
+                var contextCompactor = compactorsByThread[threadID] ?? ContextCompactor(client: client, configuration: Self.contextCompactionConfiguration)
+                let compactionOutcome = try await contextCompactor.compactOrTruncateIfNeeded(
+                    &run.messages,
+                    lastTotalTokens: lastTotalTokensByThread[threadID],
+                    totalUsage: &totalUsage,
+                    summaryGenerator: { messages in try await client.generate(messages: messages, tools: []) }
+                )
+                compactorsByThread[threadID] = contextCompactor
+                totalUsageByThread[threadID] = totalUsage
+                if compactionOutcome.didRewriteHistory {
+                    runs[turnID] = run
+                    threads[threadID] = run.messages
+                    try historyStore.save(threadID: threadID, messages: run.messages)
+                    if compactionOutcome.emitsCompactionEvent {
+                        emit("thread/contextCompacted", ["threadId": threadID, "turnId": turnID])
+                    }
+                }
                 var emittedContent = false
                 var finished = false
                 var streamClosed = false
@@ -234,6 +259,9 @@ final class NativeAgentRuntime: AgentEngine {
                         toolStarts[index] = call
                     case .finished(let usage):
                         finished = true
+                        if let usage {
+                            lastTotalTokensByThread[threadID] = usage.total
+                        }
                         if let usage, let window = client.contextWindowSize, window > 0 {
                             var last: [String: Any] = ["inputTokens": usage.input]
                             if let cacheRead = usage.cacheRead { last["cacheReadTokens"] = cacheRead }

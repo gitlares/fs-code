@@ -98,7 +98,11 @@ final class NativeProviderConnection {
             models = try JSONDecoder().decode(Catalog.self, from: data).models
                 .filter { !$0.slug.isEmpty && ($0.visibility == nil || $0.visibility == "list") }
                 .map { model in
-                    if let size = model.context_window, size > 0 { windows[model.slug] = size }
+                    // Prefer the model's real maximum capacity over the provider's conservative
+                    // default, so the client's context budget reflects what the model can actually
+                    // hold, not an artificially small number.
+                    let window = [model.max_context_window, model.context_window].compactMap { $0 }.first { $0 > 0 }
+                    if let window { windows[model.slug] = window }
                     let efforts = (model.supported_reasoning_levels ?? []).map(\.effort)
                         .filter { ReasoningConfig.Effort(rawValue: $0) != nil }
                     return ConnectionModel(id: model.slug, displayName: model.display_name ?? model.slug,

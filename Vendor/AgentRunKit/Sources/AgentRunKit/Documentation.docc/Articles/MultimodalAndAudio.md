@@ -116,17 +116,17 @@ These methods cover different use cases:
 | Method | Returns | Behavior |
 |---|---|---|
 | `generate(text:voice:options:)` | `Data` | Single request, no chunking |
-| `stream(text:voice:options:)` | `AsyncThrowingStream<TTSSegment, Error>` | Chunked, yields ordered ``TTSSegment`` values as they complete |
-| `generateAll(text:voice:options:)` | `Data` | Chunked, concatenates all segments into one `Data` |
+| `stream(text:voice:options:stitch:)` | `AsyncThrowingStream<TTSSegment, Error>` | Chunked, yields ordered ``TTSSegment`` values as provider requests complete, optionally processed through a ``TTSStitchPolicy`` |
+| `generateAll(text:voice:options:stitch:)` | `Data` | Chunked, concatenates all segments into one `Data`, stitched when a policy is supplied |
 | `generateWithManifest(text:voice:options:stitch:)` | ``TTSConcatenationResult`` | Like `generateAll` but also returns a per-segment manifest; an optional ``TTSStitchPolicy`` stitches PCM with boundary-keyed pauses |
 | `generateBatch(text:voice:options:stitch:)` | ``TTSBatchResult`` | Chunked, preserves completed segments and reports per-chunk failures instead of throwing |
-| `chunks(for:)` | `[TTSChunk]` | The chunk plan this client will use, without invoking the provider |
+| `chunks(for:stitch:)` | `[TTSChunk]` | The chunk plan this client will use for the input and optional policy, without invoking the provider |
 
 ```swift
 // Single generation
 let audio = try await tts.generate(text: "Hello, world.", voice: "nova")
 
-// Streaming segments
+// Streaming segments as each provider request completes
 for try await segment in tts.stream(text: longArticle) {
     player.play(segment.audio)
     let chunk = segment.chunk
@@ -153,8 +153,15 @@ let plan = tts.chunks(for: longArticle)
 
 `generateAll` is implemented on top of the same path and returns `result.audio`.
 
-`stream` segments always carry ``TTSSegmentTiming/uncomputed`` timing. Per-segment audio is the
-raw chunk bytes, and final container offsets are only meaningful after concatenation.
+Without a policy, `stream` segments carry ``TTSSegmentTiming/uncomputed`` timing and the raw chunk
+bytes. With a policy, each segment's `audio` is processed and playable on its own: it begins with any
+silence inserted before that chunk's body, while ``TTSSegmentTiming/byteRangeInConcatenatedAudio``
+identifies only the processed body in the virtual concatenation of every emitted `audio` and
+`durationSeconds` covers that body alone. Play or concatenate the `audio` buffers as delivered to
+hear every pause; use the ranges when you need source-body slices. Streaming yields each processed
+segment only after that chunk's provider request returns a complete response, so first-audio latency
+is bounded below by the first request's completion, not by a packet-level stream. Consumers own
+playback and storage; the library returns bytes and metadata only.
 
 #### Supported Timing
 
@@ -200,8 +207,10 @@ For force-split chunks, `text` normalizes whitespace to single spaces while `sou
 span of the words it contains. That keeps ranges monotonic for caller-side highlighting and forced
 alignment.
 
-``TTSClient/chunks(for:)`` returns the same ``TTSChunk`` values the stream will emit, without calling
-the provider. Use it to forecast chunk identity before generation or to drive offline planning.
+``TTSClient/chunks(for:stitch:)`` returns the same ``TTSChunk`` values the stream will emit for the
+same policy, without calling the provider. Use it to forecast chunk identity before generation or to
+drive offline planning; `targetCharacters` and `preferParagraphBoundaries` from the policy steer this
+plan exactly as they steer generation.
 
 ``TTSConcatenationResult`` and ``TTSManifestEntry`` pair concatenated audio bytes with a per-segment
 manifest of chunk, encoding, and timing.
@@ -214,7 +223,8 @@ Long narration assembled from short chunks has audible seams: independent draws 
 and no end-of-sentence or end-of-paragraph pause, because each chunk was synthesized without the
 surrounding structure. Pass a ``TTSStitchPolicy`` to
 ``TTSClient/generateWithManifest(text:voice:options:stitch:)`` to assemble 16-bit PCM into one stream
-with boundary-keyed pauses and edge fades.
+with boundary-keyed pauses and edge fades, or to ``TTSClient/stream(text:voice:options:stitch:)`` to
+process each chunk the same way as it completes.
 
 ```swift
 let policy = TTSStitchPolicy(
@@ -232,18 +242,31 @@ let result = try await tts.generateWithManifest(
 ```
 
 The policy couples two decisions. `targetCharacters` and `preferParagraphBoundaries` steer the chunker
-to fill toward a soft size target and cut on a sentence or, when one is near, a paragraph boundary, so
-each cut lands where the model already placed its own pause. `sentencePause`, `paragraphPause`, and
-`joinFade` then insert silence of the boundary-appropriate length and fade each segment edge into it.
-Within-sentence seams, from an oversized sentence, are joined directly with no pause.
+to fill toward a soft size target and cut on a sentence or, when one is near, a paragraph boundary
+detected in the input text. `sentencePause` and `paragraphPause` are
+minimum boundary-quiet budgets: quiet already present at the chunk edges counts toward the budget, and
+only the deficit is inserted. Every source frame is preserved, including breaths and longer pauses, so a
+boundary that already carries enough quiet gains no extra silence. This deficit accounting intentionally
+replaces always-added pauses.
+Within-sentence seams, from an oversized sentence, are joined directly with no pause. At any internal
+join, each edge receives the full `joinFade` beside a positive quiet budget and at most 1 ms at a direct
+join, unless that edge's endpoint frame is already quiet. Fades never touch the outer program
+start or end and always leave at least one source frame untouched; a zero
+`joinFade` remains a real no-op.
 
 The manifest stays truthful: each ``TTSSegmentTiming/byteRangeInConcatenatedAudio`` still covers that
-segment's audio, inserted pauses are the gaps between consecutive ranges, and `durationSeconds`
-reflects the stitched output. Stitching is deterministic for a given chunk plan and policy. It
-requires 16-bit PCM with a known sample rate and channel count; any other output throws
+segment's processed body, inserted pauses are the gaps between consecutive ranges, and
+`durationSeconds` reflects the stitched output. Stitching is deterministic for identical raw segments
+and policy. It requires 16-bit PCM with a known sample rate and channel count; any other output throws
 ``TTSError/invalidConfiguration(_:)``. Without a policy,
 ``TTSClient/generateWithManifest(text:voice:options:stitch:)`` concatenates the segments raw, exactly
-as ``TTSClient/generateAll(text:voice:options:)`` does.
+as ``TTSClient/generateAll(text:voice:options:stitch:)`` does.
+
+A processed stream follows the same layout per segment: the emitted `audio` begins with the silence
+inserted before that chunk, so playing each buffer in order reproduces the stitched program with
+every pause, while the timing range covers the body only. Treat processed stream output as final
+audio: do not feed it back through ``TTSClient/stitch(segments:policy:)`` as though it were raw
+provider audio, because the pauses and fades would be applied twice.
 
 ### Matching Loudness
 
@@ -271,44 +294,101 @@ median, and applies one scalar gain per chunk bounded by `maxCorrectionDB`. A si
 corrects the per-draw offset while leaving the chunk's own dynamics intact, and the clamp keeps every
 correction small enough that a genuinely soft chunk is never forced up to match a loud one. A
 true-peak guard then attenuates the whole program if its oversampled true peak would exceed
-`truePeakCeilingDBTP`. All correction happens in floating point and is quantized to 16-bit once, so no
-intermediate stage clips.
+`truePeakCeilingDBTP`. All correction happens in floating point over bounded sample scratch. The
+retained input and output bytes, per-chunk readings, gains, layouts, and scalar gating statistics
+grow with program length; only the waveform scratch is bounded. The program is quantized to 16-bit
+PCM once with saturation, so no intermediate stage clips or rounds to integers.
 
 ``TTSLoudnessMatch/target`` selects the anchor. `.programMedian` levels the chunks to each other and
-imposes no absolute level. `.lufs(_:)` additionally shifts the whole program to an absolute loudness,
+imposes no absolute level. `.recentMedian` levels each chunk against the latest measurable chunks in
+source order. `.lufs(_:)` additionally shifts the whole program to an absolute loudness,
 for example -16 LUFS for podcast delivery. Because the program is mono, that figure is the one-channel
 file's loudness; a player that renders it as dual-mono stereo reads it about 3 dB louder. When the
 true-peak ceiling forces the program below an absolute target the shortfall is reported, never hidden:
 ``TTSLoudnessSummary/achievedLUFS`` is where the program actually landed and
 ``TTSLoudnessSummary/appliedTrimDB`` is how far the guard pulled it down.
 
+`.recentMedian` is the causal alternative to a program anchor: every chunk is leveled to the robust
+median of the latest five measurable chunk readings in source order, including its own, so the
+correction needs no lookahead beyond the current chunk. Short or silent chunks stay out of that
+history and receive no differential gain. Peak protection is per chunk in this mode, holding each
+chunk and its joins under `truePeakCeilingDBTP`, and the chunk's
+``TTSLoudnessMeasurement/appliedGainDB`` includes that peak attenuation. No uniform trim is applied,
+so ``TTSLoudnessSummary/requestedTargetLUFS`` is nil and ``TTSLoudnessSummary/appliedTrimDB`` is zero
+while ``TTSLoudnessSummary/achievedLUFS`` and ``TTSLoudnessSummary/truePeakDBTP`` still measure the
+delivered bytes.
+
 Loudness matching populates the manifest with its own measurements. Each ``TTSManifestEntry/loudness``
 carries the segment's measured loudness and the gain applied, and ``TTSConcatenationResult/loudness``
-carries the program-level outcome, so the correction is auditable from the result alone. The pass
-requires mono 16-bit PCM and runs only through
-``TTSClient/generateWithManifest(text:voice:options:stitch:)``; streaming cannot match loudness because
-it has no lookahead over chunks not yet synthesized. The default ceiling is the EBU R128 production
-value of -1 dBTP.
+carries the program-level outcome, so the correction is auditable from the result alone. Those
+program figures describe the delivered bytes: ``TTSLoudnessSummary/achievedLUFS`` and
+``TTSLoudnessSummary/truePeakDBTP`` are measured from the returned PCM, and the peak ceiling
+reserves headroom for the worst-case quantization error of the oversampling filter. A ceiling with no
+representable headroom throws ``TTSError/invalidConfiguration(_:)`` instead of clipping, as does an
+absolute target with no measurable delivered output. The pass
+requires mono 16-bit PCM at 8 kHz or above and runs through
+``TTSClient/generateWithManifest(text:voice:options:stitch:)`` or ``TTSClient/stitch(segments:policy:)``.
+The default ceiling is the EBU R128 production value of -1 dBTP.
+
+Choose the target by the surface you are driving. Whole-program targets (`.programMedian`,
+`.lufs(_:)`) need the complete program and belong on finalized output; ``TTSClient/stream(text:voice:options:stitch:)``
+rejects them before any provider request. Live chunk processing uses `.recentMedian`, which is causal
+and produces identical audio when the same raw segments and policy are streamed or rendered afterward:
+
+```swift
+// Live: level each chunk as it completes against the latest measurable chunks.
+let livePolicy = TTSStitchPolicy(
+    sentencePause: .milliseconds(220),
+    loudness: TTSLoudnessMatch(target: .recentMedian, maxCorrectionDB: 3)
+)
+for try await segment in tts.stream(text: script, options: TTSOptions(responseFormat: .pcm), stitch: livePolicy) {
+    player.enqueue(segment.audio)
+}
+
+// Finalized: anchor the whole program and optionally hit an absolute delivery target.
+let finalPolicy = TTSStitchPolicy(
+    sentencePause: .milliseconds(220),
+    loudness: TTSLoudnessMatch(target: .lufs(-16), maxCorrectionDB: 3)
+)
+let result = try await tts.generateWithManifest(
+    text: script,
+    options: TTSOptions(responseFormat: .pcm),
+    stitch: finalPolicy
+)
+```
+
+Scalar loudness matching and seam treatment correct levels and joins only. They cannot repair the
+synthesizer's pronunciation, prosody, or voice quality, and a streamed segment is complete provider
+audio: playback can begin only after that chunk's request finishes, so delivery latency is
+chunk-complete rather than incremental.
 
 ### Recovering from Partial Failure
 
-``TTSClient/stream(text:voice:options:)``, ``TTSClient/generateAll(text:voice:options:)``, and
+``TTSClient/stream(text:voice:options:stitch:)`` yields each chunk in order as results arrive, so
+segments already delivered stand when a later chunk fails; the failure still ends the stream with an
+error. ``TTSClient/generateAll(text:voice:options:stitch:)`` and
 ``TTSClient/generateWithManifest(text:voice:options:stitch:)`` are all-or-nothing: one chunk's failure
-throws and discards the segments that already succeeded. For long inputs, where re-running the whole
+throws and the completed segments are not returned. For long inputs, where re-running the whole
 batch re-bills the good chunks, use ``TTSClient/generateBatch(text:voice:options:stitch:)``. It returns
 a ``TTSBatchResult`` that preserves every completed ``TTSSegment`` and reports each failed chunk as a
-``TTSChunkFailure`` keyed by chunk index rather than completion order; only empty text and invalid
-configuration throw.
+``TTSChunkFailure`` keyed by chunk index rather than completion order. Empty text and invalid
+configuration throw before any synthesis, while cancellation still escapes as `CancellationError`.
+Batch and retry results always carry the raw provider bytes, even when a policy is supplied, so they
+remain valid recovery input: reassemble them with ``TTSClient/stitch(segments:policy:)`` after
+retrying, and never substitute already-processed stream output for raw segments in that step.
 
-Recover by re-running just the failed chunks, merging, then assembling:
+Recover by re-running just the failed chunks, merging, then assembling. Keep one PCM request
+configuration for the batch and its retry so the recovered chunks share the stitched encoding — the
+default OpenAI format is MP3, which stitching rejects before any synthesis:
 
 ```swift
-let batch = try await tts.generateBatch(text: longArticle, stitch: policy)
+let pcm = TTSOptions(responseFormat: .pcm)
+let batch = try await tts.generateBatch(text: longArticle, options: pcm, stitch: policy)
 let whole: TTSBatchResult
 if batch.isComplete {
     whole = batch
 } else {
-    let retry = try await tts.generate(chunks: batch.failedChunks)
+    let retry = try await tts.generate(chunks: batch.failedChunks, options: pcm)
     whole = try batch.merging(retry)
 }
 let result = try tts.stitch(segments: whole.completedSegments, policy: policy)

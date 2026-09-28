@@ -1,18 +1,21 @@
 import Foundation
 
-struct ContextCompactor {
-    typealias SummaryGenerator = ([ChatMessage]) async throws -> AssistantMessage
+/// FS Editor local patch (visibility only, no logic changed): FS Editor implements its own agent
+/// loop directly over `LLMClient` (see `NativeAgentRuntime`, which deliberately does not use
+/// `Agent`) and needs this compactor as a standalone component. See Vendor/AgentRunKit/UPSTREAM.md.
+public struct ContextCompactor: Sendable {
+    public typealias SummaryGenerator = @Sendable ([ChatMessage]) async throws -> AssistantMessage
 
-    enum Outcome: Equatable {
+    public enum Outcome: Equatable {
         case unchanged
         case rewritten
         case compacted
 
-        var didRewriteHistory: Bool {
+        public var didRewriteHistory: Bool {
             self != .unchanged
         }
 
-        var emitsCompactionEvent: Bool {
+        public var emitsCompactionEvent: Bool {
             self == .compacted
         }
     }
@@ -20,7 +23,7 @@ struct ContextCompactor {
     let client: any LLMClient
     let configuration: AgentConfiguration
 
-    init(client: any LLMClient, configuration: AgentConfiguration) {
+    public init(client: any LLMClient, configuration: AgentConfiguration) {
         self.client = client
         self.configuration = configuration
     }
@@ -38,7 +41,7 @@ struct ContextCompactor {
     private var consecutiveSummarizationFailures = 0
 
     @discardableResult
-    mutating func compactOrTruncateIfNeeded(
+    public mutating func compactOrTruncateIfNeeded(
         _ messages: inout [ChatMessage],
         lastTotalTokens: Int?,
         totalUsage: inout TokenUsageTotals,
@@ -79,7 +82,7 @@ struct ContextCompactor {
     }
 
     @discardableResult
-    mutating func reactiveCompact(
+    public mutating func reactiveCompact(
         _ messages: inout [ChatMessage],
         totalUsage: inout TokenUsageTotals,
         summaryGenerator: SummaryGenerator? = nil

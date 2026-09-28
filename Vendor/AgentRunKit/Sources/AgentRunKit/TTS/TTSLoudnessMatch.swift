@@ -7,10 +7,13 @@ public struct TTSLoudnessMatch: Sendable, Equatable, Hashable, Codable {
     /// The loudness anchor the program is matched to.
     public enum Target: Sendable, Equatable, Hashable, Codable {
         case programMedian
+        /// The robust median of the latest five measurable chunks in source order, including the current chunk.
+        case recentMedian
         case lufs(Double)
     }
 
-    /// Whether chunks are leveled to the program median or additionally shifted to an absolute loudness.
+    /// Whether chunks are leveled to the program median, to the latest measurable chunks,
+    /// or additionally shifted to an absolute loudness.
     public let target: Target
     /// The maximum per-chunk gain correction in decibels.
     public let maxCorrectionDB: Double

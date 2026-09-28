@@ -129,9 +129,15 @@ final class NativeConnectionIntegrationTests: XCTestCase {
         let catalog = try NativeProviderConnection.parseCatalog(data, kind: .chatGPT)
         XCTAssertEqual(catalog.models.map(\.id), ["test"])
         XCTAssertEqual(catalog.models[0].supportedReasoningEfforts, ["medium"])
-        XCTAssertEqual(catalog.windows["test"], 272000)
+        XCTAssertEqual(catalog.windows["test"], 872000, "the client's context budget should use the model's real maximum, not the provider's conservative default")
         XCTAssertEqual(catalog.models[0].defaultContextWindow, 272000)
         XCTAssertEqual(catalog.models[0].maximumContextWindow, 872000)
+    }
+
+    func testCatalogFallsBackToDefaultWindowWhenMaximumIsAbsent() throws {
+        let data = Data(#"{"models":[{"slug":"test","display_name":"Test","visibility":"list","context_window":128000}]}"#.utf8)
+        let catalog = try NativeProviderConnection.parseCatalog(data, kind: .chatGPT)
+        XCTAssertEqual(catalog.windows["test"], 128000)
     }
 
     func testChatGPTCatalogUsesCodexProtocolCompatibilityVersion() throws {

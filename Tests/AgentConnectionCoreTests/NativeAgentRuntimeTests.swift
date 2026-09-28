@@ -463,6 +463,68 @@ final class NativeAgentRuntimeTests: XCTestCase {
         XCTAssertEqual(history.first?.afterText, "after")
     }
 
+    func testLongHistoryIsCompactedBeforeTheNextRoundInsteadOfGrowingUnbounded() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let history = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: history)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let bigContent = String(repeating: "x", count: 5_000)
+        try bigContent.write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+
+        // makeClient is invoked once per round, not once per turn: turn 1 takes two rounds (the
+        // tool-call round, then the round that produces the final answer).
+        var scripts: [[StreamDelta]] = [
+            [
+                .toolCallStart(index: 0, id: "read", name: "read_project_file", kind: .function),
+                .toolCallDelta(index: 0, arguments: "{\"relative_path\":\"a.txt\"}"),
+                .finished(usage: nil)
+            ],
+            [
+                .content("done"),
+                // 110,000 of the ScriptedClient's fixed 128,000-token window (~86%) crosses the
+                // 0.8 compactionThreshold, so turn 2's first round compacts before calling the
+                // model at all.
+                .finished(usage: TokenUsage(input: 110_000))
+            ],
+            [.content("second"), .finished(usage: nil)]
+        ]
+        var clientRequestCount = 0
+        let projectID = UUID()
+        let profileID = UUID()
+        let runtime = NativeAgentRuntime(
+            configuration: .init(projectID: projectID, projectRoot: root, profileID: profileID, sessionID: UUID(), modelID: "test", effort: nil, historyRoot: history),
+            makeClient: { _ in
+                clientRequestCount += 1
+                guard !scripts.isEmpty else {
+                    return ScriptedClient(script: [.content("unexpected extra round"), .finished(usage: nil)])
+                }
+                return ScriptedClient(script: scripts.removeFirst())
+            }
+        )
+        var events: [String] = []
+        runtime.onNotification = { method, _ in events.append(method) }
+        let thread = try await runtime.request(method: "thread/start", params: [:])
+        let threadID = try XCTUnwrap((thread["thread"] as? [String: Any])?["id"] as? String)
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "read the file"]]])
+        for _ in 0..<200 where !events.contains("turn/completed") { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertTrue(events.contains("turn/completed"), "turn 1 did not complete; events: \(events)")
+
+        events.removeAll()
+        _ = try await runtime.request(method: "turn/start", params: ["threadId": threadID, "input": [["type": "text", "text": "now what"]]])
+        for _ in 0..<200 where !events.contains("turn/completed") { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertTrue(events.contains("turn/completed"), "turn 2 did not complete; events: \(events)")
+        XCTAssertTrue(events.contains("thread/contextCompacted"), "expected a compaction event once the threshold was crossed; events: \(events)")
+        XCTAssertEqual(clientRequestCount, 3, "expected exactly two rounds in turn 1 and one in turn 2")
+
+        let messages = try XCTUnwrap(NativeAgentHistoryStore(projectID: projectID, profileID: profileID, rootOverride: history).load(threadID: threadID))
+        let toolMessage = messages.first { if case .tool = $0 { return true } else { return false } }
+        guard case let .tool(_, _, content)? = toolMessage else { return XCTFail("Expected the read_project_file tool result to still be present") }
+        XCTAssertLessThan(content.utf8.count, bigContent.utf8.count, "the old tool result should have been pruned to a short placeholder, not kept at full size")
+    }
+
     func testFindSymbolDefinitionCapabilityGateBlocksWhenDisabled() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -12,3 +12,12 @@ public struct TTSSegmentTiming: Sendable, Equatable, Codable {
 
     public static let uncomputed = TTSSegmentTiming()
 }
+
+extension TTSSegmentTiming {
+    static func processedBody(byteRange: Range<Int>, format: PCMFormat) -> TTSSegmentTiming {
+        TTSSegmentTiming(
+            byteRangeInConcatenatedAudio: byteRange,
+            durationSeconds: Double(byteRange.count) / Double(format.bytesPerSecond)
+        )
+    }
+}

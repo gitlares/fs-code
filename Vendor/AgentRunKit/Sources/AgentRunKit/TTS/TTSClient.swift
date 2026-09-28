@@ -41,23 +41,41 @@ public struct TTSClient<P: TTSProvider>: Sendable {
         )
     }
 
-    /// The chunk plan this client will use for a given input, without invoking the provider.
-    public func chunks(for text: String) -> [TTSChunk] {
+    /// The chunk plan this client will use for a given input and optional stitch policy, without invoking the provider.
+    public func chunks(for text: String, stitch: TTSStitchPolicy? = nil) -> [TTSChunk] {
         let internalChunks = SentenceChunker.chunk(
             text: text,
-            maxCharacters: provider.config.maxChunkCharacters
+            maxCharacters: provider.config.maxChunkCharacters,
+            targetCharacters: stitch?.targetCharacters,
+            preferParagraphBoundaries: stitch?.preferParagraphBoundaries ?? false
         )
         return Self.makePublicChunks(internalChunks)
     }
 
+    /// Streams one complete segment per planned chunk in order, optionally processed through a stitch policy.
+    ///
+    /// For a guide on audio workflows, see <doc:MultimodalAndAudio>.
     public func stream(
         text: String,
         voice: String? = nil,
-        options: TTSOptions = TTSOptions()
+        options: TTSOptions = TTSOptions(),
+        stitch: TTSStitchPolicy? = nil
     ) -> AsyncThrowingStream<TTSSegment, Error> {
+        let encoding = provider.resolvedEncoding(
+            for: options.responseFormat ?? provider.config.defaultFormat,
+            options: options
+        )
+        let rendering: (policy: TTSStitchPolicy, format: PCMFormat)?
+        do {
+            rendering = try streamingRendering(for: stitch, encoding: encoding)
+        } catch {
+            return AsyncThrowingStream { $0.finish(throwing: error) }
+        }
         let internalChunks = SentenceChunker.chunk(
             text: text,
-            maxCharacters: provider.config.maxChunkCharacters
+            maxCharacters: provider.config.maxChunkCharacters,
+            targetCharacters: stitch?.targetCharacters,
+            preferParagraphBoundaries: stitch?.preferParagraphBoundaries ?? false
         )
         guard !internalChunks.isEmpty else {
             return AsyncThrowingStream { $0.finish(throwing: TTSError.emptyText) }
@@ -66,25 +84,25 @@ public struct TTSClient<P: TTSProvider>: Sendable {
             plan: Self.makePublicChunks(internalChunks),
             voice: voice ?? provider.config.defaultVoice,
             options: options,
-            encoding: provider.resolvedEncoding(
-                for: options.responseFormat ?? provider.config.defaultFormat,
-                options: options
-            )
+            encoding: encoding,
+            rendering: rendering
         )
     }
 
+    /// Synthesizes the input as chunks and returns one concatenated audio buffer, optionally stitched.
     public func generateAll(
         text: String,
         voice: String? = nil,
-        options: TTSOptions = TTSOptions()
+        options: TTSOptions = TTSOptions(),
+        stitch: TTSStitchPolicy? = nil
     ) async throws -> Data {
-        try await generateWithManifest(text: text, voice: voice, options: options).audio
+        try await generateWithManifest(text: text, voice: voice, options: options, stitch: stitch).audio
     }
 
     /// Synthesizes the input and returns concatenated audio plus a per-segment manifest; chunk failure throws.
     ///
-    /// Pass a ``TTSStitchPolicy`` to assemble 16-bit PCM segments with boundary-keyed pauses and
-    /// click-safe fades; without one, segments are concatenated raw.
+    /// Pass a ``TTSStitchPolicy`` to assemble 16-bit PCM segments with minimum boundary-quiet budgets
+    /// and join fades; without one, segments are concatenated raw.
     public func generateWithManifest(
         text: String,
         voice: String? = nil,
@@ -167,6 +185,9 @@ public struct TTSClient<P: TTSProvider>: Sendable {
         guard let total = chunks.first?.total else {
             throw TTSError.invalidConfiguration("generate(chunks:) requires at least one chunk")
         }
+        guard total > 0 else {
+            throw TTSError.invalidConfiguration("generate(chunks:) requires a positive chunk total")
+        }
         let indices = chunks.map(\.index)
         guard chunks.allSatisfy({ $0.total == total }),
               indices.allSatisfy({ (0 ..< total).contains($0) }),
@@ -221,34 +242,19 @@ public struct TTSClient<P: TTSProvider>: Sendable {
 }
 
 private extension TTSClient {
-    func segmentStream(
-        plan publicChunks: [TTSChunk],
-        voice resolvedVoice: String,
-        options: TTSOptions,
+    func streamingRendering(
+        for stitch: TTSStitchPolicy?,
         encoding: TTSAudioEncoding
-    ) -> AsyncThrowingStream<TTSSegment, Error> {
-        let provider = provider
-        let maxConcurrent = maxConcurrent
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    _ = try await Self.runChunks(
-                        publicChunks,
-                        voice: resolvedVoice,
-                        options: options,
-                        encoding: encoding,
-                        provider: provider,
-                        maxConcurrent: maxConcurrent,
-                        handling: .failFast,
-                        onSegment: { continuation.yield($0) }
-                    )
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
+    ) throws -> (policy: TTSStitchPolicy, format: PCMFormat)? {
+        guard let stitch else { return nil }
+        let format = try resolvePCMFormat(for: encoding, loudness: stitch.loudness != nil)
+        if let loudness = stitch.loudness, loudness.target != .recentMedian {
+            throw TTSError.invalidConfiguration(
+                "processed streaming levels each chunk as it completes and supports .recentMedian only; "
+                    + "whole-program targets require a complete program"
+            )
         }
+        return (stitch, format)
     }
 
     static func stitched(
@@ -273,7 +279,7 @@ private extension TTSClient {
             return TTSConcatenationResult(audio: output.audio, manifest: entries, loudness: output.summary)
         }
 
-        let result = PCMStitcher.stitch(
+        let result = try PCMStitcher.stitch(
             segments: segments.map(\.audio),
             boundaries: segments.map(\.chunk.trailingBoundary),
             policy: policy,
@@ -289,18 +295,13 @@ private extension TTSClient {
         measurements: [TTSLoudnessMeasurement]?,
         format: PCMFormat
     ) -> [TTSManifestEntry] {
-        let bytesPerSecond = Double(format.bytesPerSecond)
         var entries: [TTSManifestEntry] = []
         entries.reserveCapacity(segments.count)
         for (index, segment) in segments.enumerated() {
-            let range = ranges[index]
             entries.append(TTSManifestEntry(
                 chunk: segment.chunk,
                 encoding: segment.encoding,
-                timing: TTSSegmentTiming(
-                    byteRangeInConcatenatedAudio: range,
-                    durationSeconds: Double(range.count) / bytesPerSecond
-                ),
+                timing: .processedBody(byteRange: ranges[index], format: format),
                 loudness: measurements?[index]
             ))
         }
@@ -370,108 +371,14 @@ private extension TTSClient {
         }
     }
 
-    enum ChunkFailureHandling {
-        case failFast
-        case collect
-    }
-
-    private enum ChunkAttempt {
-        case success(TTSSegment)
-        case failure(TTSChunkFailure)
-    }
-
-    static func runChunks(
-        _ chunks: [TTSChunk],
-        voice: String,
-        options: TTSOptions,
-        encoding: TTSAudioEncoding,
-        provider: P,
-        maxConcurrent: Int,
-        handling: ChunkFailureHandling,
-        onSegment: ((TTSSegment) -> Void)? = nil
-    ) async throws -> (segments: [TTSSegment], failures: [TTSChunkFailure]) {
-        try await withThrowingTaskGroup(of: ChunkAttempt.self) { group in
-            var nextToSend = 0
-            var activeTasks = 0
-            var buffer: [Int: TTSSegment] = [:]
-            var emitCursor = 0
-            var segments: [TTSSegment] = []
-            var failures: [TTSChunkFailure] = []
-
-            while nextToSend < chunks.count || activeTasks > 0 {
-                try Task.checkCancellation()
-                while activeTasks < maxConcurrent, nextToSend < chunks.count {
-                    let chunk = chunks[nextToSend]
-                    let context = TTSChunkContext(chunk: chunk, encoding: encoding)
-                    group.addTask {
-                        do {
-                            let data = try await provider.generate(
-                                text: chunk.text,
-                                voice: voice,
-                                options: options,
-                                context: context
-                            )
-                            return .success(TTSSegment(
-                                chunk: chunk,
-                                encoding: encoding,
-                                timing: .uncomputed,
-                                audio: data
-                            ))
-                        } catch is CancellationError {
-                            throw CancellationError()
-                        } catch let error as TransportError {
-                            return .failure(TTSChunkFailure(chunk: chunk, encoding: encoding, error: error))
-                        } catch {
-                            return .failure(TTSChunkFailure(
-                                chunk: chunk,
-                                encoding: encoding,
-                                error: .other(String(describing: error))
-                            ))
-                        }
-                    }
-                    nextToSend += 1
-                    activeTasks += 1
-                }
-
-                guard let attempt = try await group.next() else { break }
-                activeTasks -= 1
-
-                switch attempt {
-                case let .success(segment):
-                    if let onSegment {
-                        buffer[segment.index] = segment
-                        while let next = buffer.removeValue(forKey: emitCursor) {
-                            onSegment(next)
-                            emitCursor += 1
-                        }
-                    } else {
-                        segments.append(segment)
-                    }
-                case let .failure(failure):
-                    if handling == .failFast {
-                        throw TTSError.chunkFailed(
-                            index: failure.index,
-                            total: failure.total,
-                            sourceRange: failure.sourceRange,
-                            failure.error
-                        )
-                    }
-                    failures.append(failure)
-                }
-            }
-
-            return (segments, failures)
-        }
-    }
-
     private func resolvePCMFormat(for encoding: TTSAudioEncoding, loudness: Bool) throws -> PCMFormat {
         guard let format = PCMFormat(encoding) else {
             throw TTSError.invalidConfiguration(
                 "stitching requires 16-bit PCM output with a known sample rate and channel count"
             )
         }
-        if loudness, format.channels != 1 {
-            throw TTSError.invalidConfiguration("loudness matching requires mono (1-channel) 16-bit PCM")
+        if loudness {
+            try TTSLoudnessMatcher.validate(format: format)
         }
         return format
     }

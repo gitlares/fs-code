@@ -4,6 +4,7 @@ import Foundation
 public struct TTSLoudnessMeasurement: Sendable, Equatable, Hashable, Codable {
     /// The segment's gated integrated loudness before correction, or nil when it was too short or too quiet to measure.
     public let integratedLUFS: Double?
+    /// The gain applied to the segment in decibels, including any peak attenuation.
     public let appliedGainDB: Double
 
     public init(integratedLUFS: Double?, appliedGainDB: Double) {
@@ -16,9 +17,9 @@ public struct TTSLoudnessMeasurement: Sendable, Equatable, Hashable, Codable {
 public struct TTSLoudnessSummary: Sendable, Equatable, Hashable, Codable {
     /// The assembled program's gated integrated loudness after correction, or nil when it has no measurable signal.
     public let achievedLUFS: Double?
-    /// The absolute target requested, or nil when matching only to the program median.
+    /// The absolute target requested, or nil when matching to a median anchor.
     public let requestedTargetLUFS: Double?
-    /// The uniform attenuation in decibels the true-peak guard applied to hold the program under its ceiling.
+    /// The uniform attenuation in decibels the true-peak guard applied, zero when correction was per chunk.
     public let appliedTrimDB: Double
     /// The assembled program's true peak in dBTP, or nil when it has no signal.
     public let truePeakDBTP: Double?
