@@ -22,9 +22,9 @@ final class SwiftSymbolServerTests: XCTestCase {
         let root = Self.repoRoot()
         try await requireSourceKitLSP(root)
         let server = SwiftSymbolServer(projectRoot: root, commandRunner: ProjectCommandRunner(projectURL: root))
-        // Sources/AgentConnectionCore/NativeProjectTools.swift:11 declares `func execute(...)`.
+        // Sources/AgentConnectionCore/NativeProjectTools.swift declares `func execute(...)`.
         // Its own declaration site is its own definition, which is a stable self-hosting check.
-        let result = await server.findDefinition(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 10, column: 9)
+        let result = await server.findDefinition(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 16, column: 9)
         XCTAssertTrue(result.contains("NativeProjectTools.swift"), "expected a definition location, got: \(result)")
     }
 
@@ -32,7 +32,7 @@ final class SwiftSymbolServerTests: XCTestCase {
         let root = Self.repoRoot()
         try await requireSourceKitLSP(root)
         let server = SwiftSymbolServer(projectRoot: root, commandRunner: ProjectCommandRunner(projectURL: root))
-        let result = await server.findReferences(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 10, column: 9)
+        let result = await server.findReferences(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 16, column: 9)
         XCTAssertFalse(result.isEmpty)
         XCTAssertNotEqual(result, "Path is outside the project.")
     }
@@ -56,11 +56,11 @@ final class SwiftSymbolServerTests: XCTestCase {
         let root = Self.repoRoot()
         try await requireSourceKitLSP(root)
         let server = SwiftSymbolServer(projectRoot: root, commandRunner: ProjectCommandRunner(projectURL: root), idleTimeout: 1)
-        _ = await server.findDefinition(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 10, column: 9)
+        _ = await server.findDefinition(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 16, column: 9)
         try await Task.sleep(for: .seconds(2))
         // After the idle window elapses, a subsequent call must relaunch sourcekit-lsp rather than
         // hang against a dead transport.
-        let result = await server.findDefinition(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 10, column: 9)
+        let result = await server.findDefinition(relativePath: "Sources/AgentConnectionCore/NativeProjectTools.swift", line: 16, column: 9)
         XCTAssertTrue(result.contains("NativeProjectTools.swift"), "expected a fresh definition lookup after idle shutdown, got: \(result)")
     }
 }

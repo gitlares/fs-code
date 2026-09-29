@@ -39,7 +39,7 @@ The native agent currently exposes bounded project tools. It is not a full auton
 
 ## Download and run
 
-Download [FS Code 0.1.8 Alpha for Apple Silicon](https://github.com/gitlares/fs-code/releases/download/v0.1.8-alpha.1/FS-Code-0.1.8-arm64.zip), extract **FS Code.app**, and move it to Applications. This macOS 15+ build is Developer ID signed and notarized by Apple. See the [release notes and checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.8-alpha.1).
+Download [FS Code 0.1.9 Alpha for Apple Silicon](https://github.com/gitlares/fs-code/releases/download/v0.1.9-alpha.1/FS-Code-0.1.9-arm64.zip), extract **FS Code.app**, and move it to Applications. This macOS 15+ build is Developer ID signed and notarized by Apple. See the [release notes and checksum](https://github.com/gitlares/fs-code/releases/tag/v0.1.9-alpha.1).
 
 AI features require your own supported account or API key. Opening a project and using the editor do not require an FS Code account.
 

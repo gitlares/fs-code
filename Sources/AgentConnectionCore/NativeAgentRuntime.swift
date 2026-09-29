@@ -435,12 +435,26 @@ final class NativeAgentRuntime: AgentEngine {
                 return "Development commands are disabled for this project. Use request_project_capability or the Permissions view; the host must explicitly enable them."
             }
             guard let values = arguments["arguments"] as? [String], !values.isEmpty else { return "Tool arguments were invalid." }
+            // Hard, deterministic gates on top of the general Terminal toggle — these
+            // check the literal argv, not the model's stated intent, so enabling
+            // Terminal alone can't silently grant network egress or bypass the
+            // sensitive-file gate through a shell command instead of fs_edit_file.
+            if Self.referencesSensitivePath(values), await !capabilities.isEnabled(.sensitiveFileAccess) {
+                return "This command references a file that may hold secrets (env file, key, or credentials). " +
+                    "The Secrets & Env Files permission is off. If the user wants this, call " +
+                    "request_project_capability(capability: \"sensitiveFileAccess\", enabled: true, reason: \"...\")."
+            }
+            if Self.isNetworkCommand(values), await !capabilities.isEnabled(.networkAccess) {
+                return "This command reaches the network (push/pull/fetch/clone, curl/wget/ssh, or a package " +
+                    "install). The Network permission is off. If the user wants this, call " +
+                    "request_project_capability(capability: \"networkAccess\", enabled: true, reason: \"...\")."
+            }
             let timeout = min(max((arguments["timeout_seconds"] as? NSNumber)?.doubleValue ?? 120, 1), 1_800)
             let runID = UUID()
             emit("item/started", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "cwd": configuration.projectRoot.path]])
             let writeSnapshot = CommandWriteAuditor.snapshot(projectRoot: configuration.projectRoot)
             do {
-                let result = try await commandRunner.run(arguments: values, runID: runID, timeout: timeout)
+                let result = try await commandRunner.run(arguments: values, runID: runID, timeout: timeout, allowNetwork: await capabilities.isEnabled(.networkAccess))
                 let audit = await CommandWriteAuditor.importChanges(before: writeSnapshot, projectRoot: configuration.projectRoot, changeService: fileChangeService, threadID: threadID, turnID: turnID)
                 emit("item/completed", ["threadId": threadID, "turnId": turnID, "item": ["id": call.id, "type": "commandExecution", "command": values.joined(separator: " "), "originalCommand": result.originalArguments.joined(separator: " "), "effectiveCommand": result.effectiveArguments.joined(separator: " "), "rtkApplied": result.rtkApplied, "cwd": configuration.projectRoot.path, "status": result.exitCode == 0 ? "completed" : "failed", "exitCode": result.exitCode, "output": result.output + audit.suffixText]])
                 return "exit \(result.exitCode)\(result.timedOut ? " (timed out)" : "")\(result.outputWasTruncated ? " (output truncated)" : "")\(result.rtkApplied ? " (RTK applied)" : "")\n\(result.output)\(audit.suffixText)"
@@ -454,6 +468,15 @@ final class NativeAgentRuntime: AgentEngine {
         if call.name == "fs_edit_file", let path = arguments["relative_path"] as? String,
            Self.isPlanPath(path) {
             return "Plan files may only be updated through the plan-status host capability."
+        }
+        if ["read_project_file", "fs_edit_file"].contains(call.name),
+           let path = arguments["relative_path"] as? String, Self.isSensitivePath(path) {
+            guard await capabilities.isEnabled(.sensitiveFileAccess) else {
+                return "\"\(path)\" looks like it may hold secrets (env file, key, or credentials). This project's " +
+                    "Secrets & Env Files permission is off. If the user wants help with it, call " +
+                    "request_project_capability(capability: \"sensitiveFileAccess\", enabled: true, reason: \"...\") " +
+                    "so they can approve it — or point them to the Permissions view."
+            }
         }
         if call.name == "computer_use" {
             guard await capabilities.isEnabled(.computerUse) else {
@@ -490,10 +513,13 @@ final class NativeAgentRuntime: AgentEngine {
         ToolDefinition(name: "search_project_text", description: "Search UTF-8 project files.", parametersSchema: .object(properties: ["query": .string()], required: ["query"])),
         ToolDefinition(name: "search_code_pattern", description: "Structural (AST-aware) code search using ast-grep pattern syntax (e.g. `$FUNC($$$ARGS)`), better than plain-text search for finding code shapes. Requires the ast-grep binary.", parametersSchema: .object(properties: ["pattern": .string(), "language": .string()], required: ["pattern"])),
         ToolDefinition(name: "find_symbol_definition", description: "Find where the Swift symbol at a given file position is defined, using sourcekit-lsp. Line and column are 0-based. Requires the codeIntelligence project capability.", parametersSchema: .object(properties: ["relative_path": .string(), "line": .number(), "column": .number()], required: ["relative_path", "line", "column"])),
-        ToolDefinition(name: "find_symbol_references", description: "Find all references to the Swift symbol at a given file position, using sourcekit-lsp. Line and column are 0-based. Requires the codeIntelligence project capability.", parametersSchema: .object(properties: ["relative_path": .string(), "line": .number(), "column": .number()], required: ["relative_path", "line", "column"]))
+        ToolDefinition(name: "find_symbol_references", description: "Find all references to the Swift symbol at a given file position, using sourcekit-lsp. Line and column are 0-based. Requires the codeIntelligence project capability.", parametersSchema: .object(properties: ["relative_path": .string(), "line": .number(), "column": .number()], required: ["relative_path", "line", "column"])),
+        ToolDefinition(name: "read_memory", description: "Read this project's persistent memory: facts, corrections, and confirmed patterns learned across past sessions, shared across every model/account connected to this project. Entries referencing a `path` or `identifier` that no longer exists in the code are flagged inline.", parametersSchema: .object(properties: [:], required: []))
     ]
 
-    private static let buildToolDefinitions = readToolDefinitions + [
+    private static let writeMemoryToolDefinition = ToolDefinition(name: "write_memory", description: "Add, replace, or remove one entry in this project's persistent memory (see read_memory). Only save what's worth carrying to a future session — a correction, a pattern seen in 2+ places, or a non-obvious decision — never something cheaper to re-derive by reading the code. Never store secrets, API keys, tokens, passwords, or credentials — this is a plaintext file; reference where the credential lives instead. Bounded size: fails with the current entries listed if full, so merge/remove before adding more.", parametersSchema: .object(properties: ["action": .string(), "entry": .string(), "match": .string()], required: ["action"]))
+
+    private static let buildToolDefinitions = readToolDefinitions + [writeMemoryToolDefinition] + [
         ToolDefinition(name: "fs_edit_file", description: "Apply one audited project-relative text replacement.", parametersSchema: .object(properties: [
             "relative_path": .string(), "old_text": .string(), "new_text": .string()
         ], required: ["relative_path", "old_text", "new_text"])),
@@ -502,28 +528,99 @@ final class NativeAgentRuntime: AgentEngine {
         ,ToolDefinition(name: "computer_use", description: "Use one host-mediated Accessibility action: inspect (list accessible elements for app_bundle_id), press (requires a freshly inspected element_id), or set_text (requires a freshly inspected element_id and text). Reinspect after UI changes because element IDs become stale.", parametersSchema: .object(properties: ["action": .string(), "app_bundle_id": .string(), "element_id": .string(), "text": .string()], required: ["action", "app_bundle_id"]))
     ]
 
-    private static let planToolDefinitions = readToolDefinitions + [
+    private static let planToolDefinitions = readToolDefinitions + [writeMemoryToolDefinition] + [
         ToolDefinition(name: "fs_write_plan", description: "Write a draft Markdown plan under .fs/plans.", parametersSchema: .object(properties: [
             "relative_path": .string(), "content": .string()
         ], required: ["relative_path", "content"]))
     ]
 
-    private static let capabilityToolDefinition = ToolDefinition(name: "request_project_capability", description: "Ask the host to enable or disable exactly one project capability: developmentCommands, computerUse, or codeIntelligence. Give a short user-facing reason. The host decides and persists the result outside the repository.", parametersSchema: .object(properties: ["capability": .string(), "enabled": .boolean(), "reason": .string()], required: ["capability", "enabled", "reason"]))
+    private static let capabilityToolDefinition = ToolDefinition(name: "request_project_capability", description: "Ask the host to enable or disable exactly one project capability: developmentCommands, computerUse, codeIntelligence, sensitiveFileAccess (reading/editing files like .env, keys, or credentials), or networkAccess (git push/pull/fetch/clone, curl/wget/ssh, or a package-manager install). Request sensitiveFileAccess or networkAccess only when the user actually wants that, never on your own initiative. Give a short user-facing reason. The host decides and persists the result outside the repository.", parametersSchema: .object(properties: ["capability": .string(), "enabled": .boolean(), "reason": .string()], required: ["capability", "enabled", "reason"]))
     private static func toolDefinitions(for mode: AgentMode) -> [ToolDefinition] {
         switch mode { case .ask: readToolDefinitions + [capabilityToolDefinition]; case .plan: planToolDefinitions + [capabilityToolDefinition]; case .build: buildToolDefinitions + [capabilityToolDefinition] }
     }
 
     private static func isPermitted(_ name: String, in mode: AgentMode) -> Bool {
-        let read = ["read_project_file", "list_project_files", "search_project_text", "search_code_pattern", "find_symbol_definition", "find_symbol_references"]
+        let read = ["read_project_file", "list_project_files", "search_project_text", "search_code_pattern", "find_symbol_definition", "find_symbol_references", "read_memory"]
         if read.contains(name) { return true }
         if name == "request_project_capability" { return true }
-        switch mode { case .build: return name == "fs_edit_file" || name == "fs_update_plan" || name == "run_development_command" || name == "computer_use"; case .plan: return name == "fs_write_plan"; case .ask: return false }
+        switch mode { case .build: return name == "fs_edit_file" || name == "fs_update_plan" || name == "run_development_command" || name == "computer_use" || name == "write_memory"; case .plan: return name == "fs_write_plan" || name == "write_memory"; case .ask: return false }
     }
 
     private static func toolLimit(for mode: AgentMode) -> Int { switch mode { case .build: 40; case .plan: 15; case .ask: 4 } }
     private static func roundLimit(for mode: AgentMode) -> Int { switch mode { case .build: 16; case .plan: 8; case .ask: 4 } }
     private static func isClosingTool(_ name: String, in mode: AgentMode) -> Bool { name.hasPrefix("read_") || name == "fs_update_plan" || (mode == .plan && name == "fs_write_plan") }
     private static func isPlanPath(_ path: String) -> Bool { path.split(separator: "/").filter { $0 != "." }.joined(separator: "/").hasPrefix(".fs/plans/") }
+
+    private static let sensitiveFilenames: Set<String> = [
+        "credentials.json", "secrets.yml", "secrets.yaml", "secrets.json",
+        ".npmrc", ".netrc", "id_rsa", "id_ed25519", "id_ecdsa"
+    ]
+    private static let sensitiveExtensions: Set<String> = ["pem", "key", "p12", "pfx"]
+
+    /// A conservative name/extension heuristic gating `read_project_file` and
+    /// `fs_edit_file` behind the `sensitiveFileAccess` capability — not a
+    /// content scan, and not exhaustive (search tools aren't filtered by this
+    /// yet), but it stops the two tools that hand back or overwrite a whole
+    /// file's contents in one shot.
+    private static func isSensitivePath(_ relativePath: String) -> Bool {
+        let filename = (relativePath as NSString).lastPathComponent.lowercased()
+        if filename.hasPrefix(".env") { return true }
+        if sensitiveFilenames.contains(filename) { return true }
+        if sensitiveExtensions.contains((filename as NSString).pathExtension) { return true }
+        if relativePath.lowercased().split(separator: "/").contains("secrets") { return true }
+        return false
+    }
+
+    /// Argv-level check for `run_development_command`: does any argument look
+    /// like a path to a sensitive file? Conservative on purpose — this only
+    /// needs to catch the common `cat .env`, `echo … >> .env`, `cp id_rsa …`
+    /// shapes, not defeat deliberate obfuscation, since the point is to close
+    /// the obvious shell bypass around the file-tool gate, not sandbox the shell.
+    private static func referencesSensitivePath(_ argv: [String]) -> Bool {
+        argv.contains { isSensitivePath($0) }
+    }
+
+    private static let networkExecutables: Set<String> = [
+        "curl", "wget", "ssh", "scp", "sftp", "rsync", "http", "https", "nc", "netcat", "telnet", "gh", "ftp"
+    ]
+    private static let networkSubcommandsByExecutable: [String: Set<String>] = [
+        "git": ["push", "pull", "fetch", "clone", "remote"],
+        "npm": ["install", "i", "ci", "update", "upgrade", "publish"],
+        "yarn": ["install", "add", "up", "upgrade", "publish"],
+        "pnpm": ["install", "i", "add", "up", "update", "publish"],
+        "pip": ["install", "download"],
+        "pip3": ["install", "download"],
+        "gem": ["install"],
+        "cargo": ["install", "add", "publish"],
+        "go": ["get", "install"],
+        "brew": ["install", "upgrade", "update", "tap"],
+        "docker": ["pull", "push"]
+    ]
+
+    /// Argv-level check for whether a command reaches outside the machine.
+    /// Matches on the literal executable/subcommand, not stated intent — e.g.
+    /// `npm run build` is untouched, only `npm install` (and siblings that
+    /// actually hit a registry/remote) trip this.
+    private static func isNetworkCommand(_ argv: [String]) -> Bool {
+        let executable = argv.first.map { ($0 as NSString).lastPathComponent.lowercased() } ?? ""
+        if networkExecutables.contains(executable) { return true }
+        if let subcommands = networkSubcommandsByExecutable[executable],
+           argv.dropFirst().contains(where: { subcommands.contains($0.lowercased()) }) {
+            return true
+        }
+        guard ["zsh", "bash", "sh"].contains(executable) else { return false }
+        // A login-shell wrapper (`/bin/zsh -lc "..."`) hides the real argv in one
+        // string; scan its words for the same shapes rather than let it slip through.
+        let words: [String] = argv.dropFirst().joined(separator: " ").lowercased()
+            .split(whereSeparator: { " \n\t|&;".contains($0) })
+            .map(String.init)
+        if words.contains(where: { networkExecutables.contains($0) }) { return true }
+        for (exe, subcommands) in networkSubcommandsByExecutable {
+            guard let index = words.firstIndex(of: exe) else { continue }
+            if words[(index + 1)...].contains(where: { subcommands.contains($0) }) { return true }
+        }
+        return false
+    }
 
     private func emit(_ method: String, _ params: [String: Any]) {
         notificationHandler?(method, params)

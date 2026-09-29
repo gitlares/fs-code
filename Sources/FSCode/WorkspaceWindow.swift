@@ -893,6 +893,8 @@ import AgentConnectionCore
         case .developmentCommands: return "Terminal"
         case .computerUse: return "Computer Use"
         case .codeIntelligence: return "Code Intelligence"
+        case .sensitiveFileAccess: return "Secrets & Env Files"
+        case .networkAccess: return "Network (push, curl, installs)"
         }
     }
 

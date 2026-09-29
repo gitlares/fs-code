@@ -15,7 +15,7 @@ let package = Package(
         .target(name: "ProjectLibrary"),
         .target(name: "EditorCore", dependencies: ["Yams"]),
         .target(name: "AgentContextCore"),
-        .target(name: "AgentConnectionCore", dependencies: [.product(name: "AgentRunKit", package: "AgentRunKit")]),
+        .target(name: "AgentConnectionCore", dependencies: ["AgentContextCore", .product(name: "AgentRunKit", package: "AgentRunKit")]),
         .executableTarget(name: "FSCode", dependencies: ["ProjectLibrary", "EditorCore", "AgentContextCore", "AgentConnectionCore", .product(name: "SwiftTerm", package: "SwiftTerm"), .product(name: "Sparkle", package: "Sparkle")]),
         .testTarget(name: "ProjectLibraryTests", dependencies: ["ProjectLibrary"]),
         .testTarget(name: "EditorCoreTests", dependencies: ["EditorCore"]),

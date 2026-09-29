@@ -421,6 +421,14 @@ final class MarkdownPreviewView: NSView, NSTextViewDelegate {
         case .listItem:
             paragraph.firstLineHeadIndent = 0
             paragraph.headIndent = 22
+            if presentation == .assistant {
+                // Bullets read as supporting detail, not the same weight as the
+                // summary sentence above them — smaller, secondary-colored, and
+                // a tighter rhythm than the paragraph spacing around them.
+                paragraph.paragraphSpacing = 4
+                attributes[.font] = UIFont.text(ofSize: NSFont.systemFontSize - 1)
+                attributes[.foregroundColor] = NSColor.secondaryLabelColor
+            }
         case .quote:
             attributes[.foregroundColor] = NSColor.secondaryLabelColor
             paragraph.headIndent = 16

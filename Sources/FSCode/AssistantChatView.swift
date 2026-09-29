@@ -1,5 +1,6 @@
 import AppKit
 import AgentConnectionCore
+import AgentContextCore
 
 @MainActor
 final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate {
@@ -59,6 +60,9 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var queueScrollHeightConstraint: NSLayoutConstraint?
     private var pendingTranscriptReveal: (threadID: UUID, profileID: UUID, existingIDs: Set<UUID>, expectedID: UUID?)?
     private var pendingQueueRevealID: UUID?
+    private var mentionPaletteHeightConstraint: NSLayoutConstraint?
+    private var mentionQueryRange: NSRange?
+    private var mentionSearchGeneration = 0
 
     private enum TranscriptViewportAnchor {
         case tail
@@ -95,6 +99,13 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private let footerControls = NSStackView()
     private let connectionRow = NSStackView()
     private let messageRow = NSStackView()
+    private let mentionPalette = ChatMentionPalette()
+    private lazy var mentionFileIndex = ChatMentionFileIndex(projectURL: projectURL)
+    private lazy var memoryContextStore = ContextStore(configuration: ContextStoreConfiguration(projectURL: projectURL))
+    private var cachedMemoryByteCount: Int?
+    // Must match NativeProjectTools.memoryRuleName in AgentConnectionCore — no
+    // shared module owns both sides, so this name is duplicated deliberately.
+    private static let memoryRuleName = "Memory (agent-authored)"
 
     init(
         manager: AgentConversationManager,
@@ -115,6 +126,7 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         super.init(frame: .zero)
         buildInterface()
         refreshInterface()
+        refreshCachedMemoryByteCount()
     }
 
     required init?(coder: NSCoder) {
@@ -507,6 +519,23 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
             chatHeader.heightAnchor.constraint(equalToConstant: 30)
         ])
         updateFooterLayout(compact: true)
+
+        addSubview(mentionPalette)
+        mentionPalette.translatesAutoresizingMaskIntoConstraints = false
+        let mentionHeight = mentionPalette.heightAnchor.constraint(equalToConstant: 0)
+        mentionPaletteHeightConstraint = mentionHeight
+        NSLayoutConstraint.activate([
+            mentionPalette.leadingAnchor.constraint(equalTo: composerContainer.leadingAnchor, constant: 8),
+            mentionPalette.trailingAnchor.constraint(equalTo: composerContainer.trailingAnchor, constant: -8),
+            mentionPalette.bottomAnchor.constraint(equalTo: composerContainer.topAnchor, constant: -6),
+            mentionHeight
+        ])
+
+        composer.onReturnOverride = { [weak self] in
+            guard let self, self.mentionPalette.isVisible else { return false }
+            self.mentionPalette.selectHighlighted()
+            return true
+        }
     }
 
     private func updateFooterLayout(compact: Bool) {
@@ -1231,6 +1260,144 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         effort.rawValue.lowercased() == "xhigh" ? "Extra High" : effort.rawValue.capitalized
     }
 
+    /// Triggered when the composer contains only "/", mirroring a terminal-style
+    /// command palette. Reuses the same actions as the toolbar's Mode/Model/Stats
+    /// menus so behavior stays identical regardless of entry point.
+    private func showSlashCommandMenu() {
+        guard manager.draft == "/" else { return }
+        let menu = NSMenu()
+
+        let modeItem = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
+        let modeMenu = NSMenu()
+        for mode in AgentMode.allCases {
+            let item = modeMenu.addItem(withTitle: modeDisplayName(mode), action: #selector(slashSelectMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = mode == manager.mode ? .on : .off
+        }
+        modeItem.submenu = modeMenu
+        menu.addItem(modeItem)
+
+        let modelItem = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
+        let modelMenu = NSMenu()
+        for model in manager.models {
+            let item = modelMenu.addItem(withTitle: model.displayName, action: #selector(slashSelectModel(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = model.id
+            item.state = model.id == manager.selectedModelID ? .on : .off
+        }
+        modelItem.submenu = modelMenu
+        menu.addItem(modelItem)
+
+        let currentModel = manager.models.first { $0.id == manager.selectedModelID } ?? manager.models.first
+        if let efforts = currentModel?.supportedEfforts, !efforts.isEmpty {
+            let effortItem = NSMenuItem(title: "Effort", action: nil, keyEquivalent: "")
+            let effortMenu = NSMenu()
+            for effort in efforts {
+                let item = effortMenu.addItem(withTitle: effortDisplayName(effort), action: #selector(slashSelectEffort(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = effort.rawValue
+                item.state = effort == manager.selectedEffort ? .on : .off
+            }
+            effortItem.submenu = effortMenu
+            menu.addItem(effortItem)
+        }
+
+        let accountItem = NSMenuItem(title: "Account", action: nil, keyEquivalent: "")
+        let accountMenu = NSMenu()
+        for profile in connectionManager.profiles {
+            let item = accountMenu.addItem(withTitle: profile.name, action: #selector(slashSelectAccount(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = profile.id
+            item.state = profile.id == connectionManager.selectedProfileID ? .on : .off
+        }
+        if !connectionManager.profiles.isEmpty { accountMenu.addItem(.separator()) }
+        let addAccountItem = accountMenu.addItem(withTitle: "Connect Model…", action: #selector(slashAddAccount), keyEquivalent: "")
+        addAccountItem.target = self
+        let manageAccountsItem = accountMenu.addItem(withTitle: "Manage Connections…", action: #selector(slashManageAccounts), keyEquivalent: "")
+        manageAccountsItem.target = self
+        accountItem.submenu = accountMenu
+        menu.addItem(accountItem)
+
+        menu.addItem(.separator())
+
+        let statsItem = menu.addItem(withTitle: "Stats", action: #selector(slashShowStats), keyEquivalent: "")
+        statsItem.target = self
+
+        let clearItem = menu.addItem(withTitle: "Clear (new chat)", action: #selector(slashClear), keyEquivalent: "")
+        clearItem.target = self
+
+        let helpItem = menu.addItem(withTitle: "Help", action: #selector(slashShowHelp), keyEquivalent: "")
+        helpItem.target = self
+
+        menu.popUp(positioning: nil, at: NSPoint(x: 4, y: 0), in: composer)
+    }
+
+    @objc private func slashSelectMode(_ sender: NSMenuItem) {
+        changeMode(sender)
+        clearSlashComposer()
+    }
+
+    @objc private func slashSelectModel(_ sender: NSMenuItem) {
+        changeModel(sender)
+        clearSlashComposer()
+    }
+
+    @objc private func slashSelectEffort(_ sender: NSMenuItem) {
+        changeEffort(sender)
+        clearSlashComposer()
+    }
+
+    @objc private func slashSelectAccount(_ sender: NSMenuItem) {
+        changeAccount(sender)
+        clearSlashComposer()
+    }
+
+    @objc private func slashAddAccount() {
+        clearSlashComposer()
+        addAccount()
+    }
+
+    @objc private func slashManageAccounts() {
+        clearSlashComposer()
+        manageAccounts()
+    }
+
+    @objc private func slashShowStats() {
+        showContextUsage()
+        clearSlashComposer()
+    }
+
+    @objc private func slashClear() {
+        clearSlashComposer()
+        createChat()
+    }
+
+    @objc private func slashShowHelp() {
+        let menu = NSMenu()
+        let commands: [(String, String)] = [
+            ("/model", "Switch the active model"),
+            ("/mode", "Switch Build / Plan / Ask"),
+            ("/effort", "Switch reasoning effort"),
+            ("/account", "Switch or manage connections"),
+            ("/stats", "Show context/token usage"),
+            ("/clear", "Start a new chat"),
+            ("/help", "List available commands")
+        ]
+        for (name, description) in commands {
+            menu.addItem(withTitle: "\(name) — \(description)", action: nil, keyEquivalent: "")
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 4, y: 0), in: composer)
+        clearSlashComposer()
+    }
+
+    private func clearSlashComposer() {
+        guard manager.draft == "/" else { return }
+        manager.updateDraft("")
+        composer.string = ""
+        composer.needsDisplay = true
+    }
+
     @objc private func showAccounts() {
         let menu = NSMenu()
         for profile in connectionManager.profiles {
@@ -1279,7 +1446,29 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         } else {
             menu.addItem(withTitle: "Last request input context is not reported", action: nil, keyEquivalent: "")
         }
+        if let bytes = cachedMemoryByteCount, bytes > 0 {
+            let approximateTokens = (bytes + 3) / 4
+            menu.addItem(
+                withTitle: "Memory: ~\(approximateTokens) tokens (\(bytes) bytes, shared across models/accounts)",
+                action: nil,
+                keyEquivalent: ""
+            )
+        }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: contextButton.bounds.height), in: contextButton)
+        refreshCachedMemoryByteCount()
+    }
+
+    /// Refreshes in the background so the *next* time this menu opens it's current;
+    /// this menu is informational-only (`action: nil` items throughout), so a
+    /// one-open-behind figure here is an acceptable tradeoff against blocking the
+    /// menu on disk I/O.
+    private func refreshCachedMemoryByteCount() {
+        Task { [weak self] in
+            guard let self else { return }
+            guard let snapshot = try? await self.memoryContextStore.load() else { return }
+            let bytes = snapshot.rules.first { $0.origin == .fsCode && $0.scope == .project && $0.name == Self.memoryRuleName }?.content.utf8.count ?? 0
+            self.cachedMemoryByteCount = bytes
+        }
     }
 
     @objc private func sendMessage() {
@@ -1392,6 +1581,96 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         guard !isUpdatingDraft, notification.object as? NSTextView === composer else { return }
         manager.updateDraft(composer.string)
         updateComposerState()
+        if composer.string == "/" {
+            DispatchQueue.main.async { [weak self] in self?.showSlashCommandMenu() }
+        }
+        updateMentionState()
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard textView === composer, mentionPalette.isVisible else { return false }
+        switch selector {
+        case #selector(NSResponder.moveUp(_:)):
+            mentionPalette.moveSelection(by: -1)
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            mentionPalette.moveSelection(by: 1)
+            return true
+        case #selector(NSResponder.insertTab(_:)):
+            mentionPalette.selectHighlighted()
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            hideMentionPalette()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Finds the "@query" token touching the caret, if any: an "@" that starts
+    /// at the beginning of the text or right after whitespace, running unbroken
+    /// up to (and including) the caret.
+    private struct MentionToken {
+        let range: NSRange
+        let query: String
+    }
+
+    private func currentMentionToken() -> MentionToken? {
+        let string = composer.string
+        let selection = composer.selectedRange()
+        guard selection.length == 0, let caretIndex = Range(selection, in: string)?.lowerBound else { return nil }
+        var start = caretIndex
+        while start > string.startIndex {
+            let previous = string.index(before: start)
+            if string[previous].isWhitespace { break }
+            start = previous
+        }
+        guard start < caretIndex, string[start] == "@" else { return nil }
+        let queryStart = string.index(after: start)
+        let query = String(string[queryStart..<caretIndex])
+        return MentionToken(range: NSRange(start..<caretIndex, in: string), query: query)
+    }
+
+    private func updateMentionState() {
+        guard let token = currentMentionToken() else {
+            hideMentionPalette()
+            return
+        }
+        mentionQueryRange = token.range
+        mentionSearchGeneration += 1
+        let generation = mentionSearchGeneration
+        let query = token.query
+        Task { [weak self] in
+            guard let self else { return }
+            let files = await self.mentionFileIndex.files()
+            guard self.mentionSearchGeneration == generation else { return }
+            let filtered = ChatMentionFileIndex.filter(files, query: query)
+            guard !filtered.isEmpty else { self.hideMentionPalette(); return }
+            let items = filtered.prefix(30).map { path in
+                ChatMentionPalette.Item(relativePath: path) { [weak self] in self?.insertMention(path: path) }
+            }
+            self.mentionPalette.show(items: Array(items))
+            self.mentionPaletteHeightConstraint?.constant = self.mentionPalette.preferredHeight
+        }
+    }
+
+    private func hideMentionPalette() {
+        mentionQueryRange = nil
+        mentionSearchGeneration += 1
+        guard mentionPalette.isVisible else { return }
+        mentionPalette.hide()
+        mentionPaletteHeightConstraint?.constant = 0
+    }
+
+    private func insertMention(path: String) {
+        guard let range = mentionQueryRange else { return }
+        let text = composer.string as NSString
+        guard range.location + range.length <= text.length else { return }
+        let replacement = "@\(path) "
+        composer.insertText(replacement, replacementRange: range)
+        let caret = range.location + (replacement as NSString).length
+        composer.setSelectedRange(NSRange(location: caret, length: 0))
+        window?.makeFirstResponder(composer)
     }
 
     private func loadAttachmentsForSelectedChat() {
@@ -1533,9 +1812,21 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         NSLayoutConstraint.activate([
             rowStack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
             rowStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-            rowStack.topAnchor.constraint(equalTo: cell.topAnchor, constant: isUser ? 5 : 8),
+            // Extra headroom before a new user question reads as "a new turn started"
+            // without needing a bubble around the assistant's reply.
+            rowStack.topAnchor.constraint(equalTo: cell.topAnchor, constant: isUser ? Spacing.l : Spacing.s),
             rowStack.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: isUser ? -7 : -8)
         ])
+
+        if isUser, row > 0 {
+            // NSBox's native separator draws with the system's adaptive hairline
+            // color, so unlike a manually-tinted CALayer it never goes stale on a
+            // light/dark switch.
+            let hairline = NSBox()
+            hairline.boxType = .separator
+            rowStack.addArrangedSubview(hairline)
+            hairline.widthAnchor.constraint(equalTo: rowStack.widthAnchor).isActive = true
+        }
 
         let checkpoint = !isUser && message.phase == .finalAnswer ? AssistantCheckpoint.extract(from: message.text) : nil
         let body: NSView

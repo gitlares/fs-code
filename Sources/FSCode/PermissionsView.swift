@@ -8,6 +8,8 @@ final class PermissionsView: NSView {
     private let terminal = NSButton(checkboxWithTitle: "Terminal", target: nil, action: nil)
     private let computerUse = NSButton(checkboxWithTitle: "Computer Use", target: nil, action: nil)
     private let codeIntelligence = NSButton(checkboxWithTitle: "Code Intelligence", target: nil, action: nil)
+    private let sensitiveFileAccess = NSButton(checkboxWithTitle: "Secrets & Env Files", target: nil, action: nil)
+    private let networkAccess = NSButton(checkboxWithTitle: "Network (push, curl, installs)", target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "")
     private let accessibility = NSTextField(wrappingLabelWithString: "")
 
@@ -25,6 +27,8 @@ final class PermissionsView: NSView {
             terminal.state = await store.isEnabled(.developmentCommands) ? .on : .off
             computerUse.state = await store.isEnabled(.computerUse) ? .on : .off
             codeIntelligence.state = await store.isEnabled(.codeIntelligence) ? .on : .off
+            sensitiveFileAccess.state = await store.isEnabled(.sensitiveFileAccess) ? .on : .off
+            networkAccess.state = await store.isEnabled(.networkAccess) ? .on : .off
             updateAccessibilityStatus()
             status.stringValue = ""
         }
@@ -51,6 +55,14 @@ final class PermissionsView: NSView {
         codeIntelligence.target = self
         codeIntelligence.action = #selector(changeCapability)
         codeIntelligence.setAccessibilityLabel("Allow Code Intelligence for this project")
+        sensitiveFileAccess.target = self
+        sensitiveFileAccess.action = #selector(changeCapability)
+        sensitiveFileAccess.setAccessibilityLabel("Allow reading and editing secrets and env files for this project")
+        sensitiveFileAccess.toolTip = "Files like .env, credentials.json, or *.pem/*.key stay off-limits to the agent until you enable this."
+        networkAccess.target = self
+        networkAccess.action = #selector(changeCapability)
+        networkAccess.setAccessibilityLabel("Allow network-reaching commands for this project")
+        networkAccess.toolTip = "git push/pull/fetch/clone, curl, wget, ssh/scp, and package-manager installs stay blocked until you enable this — separate from local Terminal access."
 
         let requestAccessibility = NSButton(title: "Open Accessibility Settings…", target: self, action: #selector(requestAccessibilityPermission))
         requestAccessibility.controlSize = .small
@@ -60,7 +72,7 @@ final class PermissionsView: NSView {
         status.textColor = .systemRed
         status.maximumNumberOfLines = 0
 
-        let stack = NSStackView(views: [description, readSearch, fileEdits, terminal, computerUse, codeIntelligence, accessibility, requestAccessibility, status])
+        let stack = NSStackView(views: [description, readSearch, fileEdits, terminal, computerUse, codeIntelligence, sensitiveFileAccess, networkAccess, accessibility, requestAccessibility, status])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -92,7 +104,9 @@ final class PermissionsView: NSView {
         let capability: ProjectCapability
         if sender === terminal { capability = .developmentCommands }
         else if sender === computerUse { capability = .computerUse }
-        else { capability = .codeIntelligence }
+        else if sender === codeIntelligence { capability = .codeIntelligence }
+        else if sender === sensitiveFileAccess { capability = .sensitiveFileAccess }
+        else { capability = .networkAccess }
         let requestedState = sender.state == .on
         sender.isEnabled = false
         Task { [weak self] in

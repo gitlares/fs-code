@@ -164,11 +164,17 @@ final class TerminalPaneView: NSView, LocalProcessTerminalViewDelegate {
         var options = TerminalOptions.default
         options.scrollback = 2_000
         options.enableSixelReported = false
-        return LocalProcessTerminalView(
+        let view = LocalProcessTerminalView(
             frame: .zero,
             font: .monospacedSystemFont(ofSize: 13, weight: .regular),
             options: options
         )
+        // SwiftTerm defaults to treating Option as Meta, which swallows the key
+        // event instead of letting macOS compose the character. On layouts where
+        // common symbols are Option-modified (e.g. "@" via Option+2 on Spanish/
+        // Latin American keyboards), that made them impossible to type.
+        view.optionAsMetaKey = false
+        return view
     }
 
     // MARK: Drag and drop

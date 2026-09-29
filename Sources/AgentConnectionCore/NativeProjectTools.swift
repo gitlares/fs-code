@@ -1,12 +1,18 @@
+import AgentContextCore
 import Darwin
 import Foundation
 
 actor NativeProjectTools {
     let rootURL: URL
     private let commandRunner: ProjectCommandRunner
+    private let contextStore: ContextStore
+    private static let memoryRuleName = "Memory (agent-authored)"
+    private static let memoryMaxBytes = 4_000
+
     init(rootURL: URL, commandRunner: ProjectCommandRunner) {
         self.rootURL = rootURL
         self.commandRunner = commandRunner
+        self.contextStore = ContextStore(configuration: ContextStoreConfiguration(projectURL: rootURL))
     }
     func execute(name: String, arguments: [String: String], mode: AgentMode = .ask, selectedPlanID: String? = nil) async -> String {
         switch name {
@@ -16,6 +22,14 @@ actor NativeProjectTools {
             return String(text.prefix(200_000))
         case "list_project_files":
             return projectFiles().joined(separator: "\n")
+        case "read_memory":
+            return await readMemory()
+        case "write_memory":
+            return await writeMemory(
+                action: (arguments["action"] ?? "").lowercased(),
+                entry: arguments["entry"],
+                match: arguments["match"]
+            )
         case "search_project_text":
             guard let query = arguments["query"], !query.isEmpty, query.utf8.count <= 512 else { return "Search query was invalid." }
             if let ripgrepResult = await searchWithRipgrep(query: query) { return ripgrepResult }
@@ -178,6 +192,149 @@ actor NativeProjectTools {
         return files.sorted()
     }
 
+
+    // MARK: - Project memory
+    //
+    // Backed by `ContextStore` so the same rule the agent writes here is the one
+    // already pushed into every request's system context (no separate injection
+    // path to build or keep in sync) and already visible/editable in the Agent
+    // Context sidebar (no separate UI to build). It lives at project scope, not
+    // per connection profile, so switching accounts/models does not silo it.
+
+    private func findMemoryRule() async -> ContextRule? {
+        guard let snapshot = try? await contextStore.load() else { return nil }
+        return snapshot.rules.first { $0.origin == .fsCode && $0.scope == .project && $0.name == Self.memoryRuleName }
+    }
+
+    private func readMemory() async -> String {
+        guard let rule = await findMemoryRule(), !rule.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Memory is empty. Use write_memory (action: \"add\", entry: \"...\") to save something worth " +
+                "keeping for next time: a correction, a pattern confirmed by seeing it in 2+ places (not a single " +
+                "occurrence), or a non-obvious decision. Skip anything cheaper to re-derive by reading the code."
+        }
+        var annotatedLines: [String] = []
+        for line in rule.content.split(separator: "\n", omittingEmptySubsequences: false) {
+            annotatedLines.append(await annotateIfStale(String(line)))
+        }
+        let byteCount = rule.content.utf8.count
+        return "\(annotatedLines.joined(separator: "\n"))\n\n(\(byteCount)/\(Self.memoryMaxBytes) bytes used)"
+    }
+
+    private func writeMemory(action: String, entry: String?, match: String?) async -> String {
+        if let entry, Self.containsLikelySecret(entry) {
+            return "Refused: this looks like it contains a secret, API key, token, or credential. Memory is a " +
+                "plaintext file — never store the value itself. Reference where it lives instead " +
+                "(e.g. \"the OpenAI key from .env.local\" or \"see the fs-code Keychain item\")."
+        }
+        let current = await findMemoryRule()
+        var lines = (current?.content ?? "")
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+        switch action {
+        case "add":
+            guard let entry, !entry.isEmpty else { return "write_memory (add) requires a non-empty \"entry\"." }
+            let bullet = "- \(entry)"
+            guard !lines.contains(bullet) else { return "That's already recorded." }
+            lines.append(bullet)
+        case "replace":
+            guard let match, !match.isEmpty, let entry, !entry.isEmpty else {
+                return "write_memory (replace) requires both \"match\" and \"entry\"."
+            }
+            guard let index = lines.firstIndex(where: { $0.contains(match) }) else {
+                return "No memory entry contains \"\(match)\"."
+            }
+            lines[index] = "- \(entry)"
+        case "remove":
+            guard let match, !match.isEmpty else { return "write_memory (remove) requires \"match\"." }
+            let before = lines.count
+            lines.removeAll { $0.contains(match) }
+            guard lines.count < before else { return "No memory entry contains \"\(match)\"." }
+        default:
+            return "Unknown action \"\(action)\". Use \"add\", \"replace\", or \"remove\"."
+        }
+
+        let newContent = lines.joined(separator: "\n")
+        guard newContent.utf8.count <= Self.memoryMaxBytes else {
+            let listing = lines.map { "  \($0)" }.joined(separator: "\n")
+            return "Memory is full (would be \(newContent.utf8.count)/\(Self.memoryMaxBytes) bytes). Merge or " +
+                "remove an existing entry first, then retry:\n\(listing)"
+        }
+        do {
+            if let current {
+                _ = try await contextStore.update(id: current.id, expectedHash: current.hash, content: newContent)
+            } else {
+                _ = try await contextStore.create(name: Self.memoryRuleName, scope: .project, content: newContent)
+            }
+            return "Memory saved (\(newContent.utf8.count)/\(Self.memoryMaxBytes) bytes)."
+        } catch {
+            return "Memory was not saved: \(error.localizedDescription)"
+        }
+    }
+
+    /// Flags backticked file paths and identifiers that no longer exist in the
+    /// live project, so a stale memory entry gets caught automatically instead
+    /// of silently misleading a future turn.
+    private func annotateIfStale(_ line: String) async -> String {
+        for span in backtickedSpans(in: line) {
+            if span.contains("/") || span.contains(".") {
+                if projectFile(span) == nil, !FileManager.default.fileExists(atPath: rootURL.appendingPathComponent(span).path) {
+                    return line + "  ⚠️ stale: `\(span)` not found in the project"
+                }
+            } else if span.count > 2, span.first?.isLetter == true || span.first == "_" {
+                if await !existsInProject(literal: span) {
+                    return line + "  ⚠️ stale: `\(span)` not found in current code"
+                }
+            }
+        }
+        return line
+    }
+
+    /// A deterministic, non-LLM-dependent gate: `write_memory`'s content lands in
+    /// a plaintext file, so refusing to store secrets can't rely on the model
+    /// remembering not to — this always runs regardless of what was asked.
+    private static let secretPrefixes = [
+        "sk-", "sk-ant-", "AKIA", "ASIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+        "glpat-", "AIza", "ya29.", "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-", "-----BEGIN"
+    ]
+    private static let jwtShapedPattern = try? NSRegularExpression(pattern: #"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"#)
+    private static let labeledSecretPattern = try? NSRegularExpression(
+        pattern: #"(?i)(api[_-]?key|secret|token|password|credential)\w*[\s:="']{1,4}[A-Za-z0-9_\-/+=]{16,}"#
+    )
+
+    private static func containsLikelySecret(_ text: String) -> Bool {
+        if secretPrefixes.contains(where: text.contains) { return true }
+        let range = NSRange(text.startIndex..., in: text)
+        if jwtShapedPattern?.firstMatch(in: text, range: range) != nil { return true }
+        if labeledSecretPattern?.firstMatch(in: text, range: range) != nil { return true }
+        return false
+    }
+
+    private func backtickedSpans(in line: String) -> [String] {
+        var spans: [String] = []
+        var current: String?
+        for character in line {
+            if character == "`" {
+                if let value = current { spans.append(value) }
+                current = current == nil ? "" : nil
+            } else if current != nil {
+                current?.append(character)
+            }
+        }
+        return spans.filter { !$0.isEmpty }
+    }
+
+    private func existsInProject(literal: String) async -> Bool {
+        guard literal.utf8.count <= 200 else { return true }
+        let arguments = ["rg", "-l", "-F", "--max-count=1", "--", literal, "."]
+        guard let result = try? await commandRunner.run(arguments: arguments, timeout: 5, maxOutputBytes: 4_096) else {
+            return true // rg unavailable or errored: never flag stale on a tooling failure
+        }
+        switch result.exitCode {
+        case 0: return true
+        case 1: return false
+        default: return true
+        }
+    }
 
     private func readText(_ url: URL) -> String? {
         guard !Task.isCancelled,

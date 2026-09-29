@@ -5,6 +5,17 @@ public enum ProjectCapability: String, Codable, CaseIterable, Sendable {
     case developmentCommands
     case computerUse
     case codeIntelligence
+    /// Reading or editing a file that looks like it holds secrets (`.env`,
+    /// keys, credentials). Off by default: the agent must ask and the user
+    /// must approve before it touches one, even if the user's own request is
+    /// what prompted it — approval scopes the whole project, not one file.
+    case sensitiveFileAccess
+    /// Running a command that reaches outside the machine: `git push/pull`,
+    /// `curl`, package-manager installs, `ssh`/`scp`, etc. Separate from
+    /// `developmentCommands` on purpose — a user may want the agent running
+    /// local builds/tests without also being able to push commits or fetch
+    /// arbitrary code from the network.
+    case networkAccess
 }
 
 public struct ProjectCapabilityRequest: Sendable, Equatable {

@@ -68,7 +68,8 @@ public actor ProjectCommandRunner {
         arguments: [String],
         runID: UUID = UUID(),
         timeout: TimeInterval = 120,
-        maxOutputBytes: Int = 65_536
+        maxOutputBytes: Int = 65_536,
+        allowNetwork: Bool = false
     ) async throws -> ProjectCommandResult {
         guard let requestedExecutable = arguments.first,
               arguments.count <= 64,
@@ -81,6 +82,24 @@ public actor ProjectCommandRunner {
         }
 
         let command = Self.effectiveArguments(for: [executable] + arguments.dropFirst(), rtkExecutablePath: rtkExecutablePath)
+
+        // Kernel-enforced network denial (Seatbelt/sandbox-exec), not an argv-pattern
+        // guess: it also stops a script or unlisted binary the caller's own network
+        // heuristic never recognized. `swift build/test/run/package` is exempted —
+        // SwiftPM sandboxes its own Package.swift manifest evaluation, and macOS
+        // refuses to nest a second sandbox_apply inside our outer one (verified: a
+        // direct `swiftc` compile is unaffected, only the SwiftPM manifest step is).
+        var sandboxProfilePath: String?
+        var spawnExecutable = command.arguments[0]
+        var spawnArguments = command.arguments
+        if !allowNetwork, !Self.isSwiftPackageManagerInvocation(command.arguments) {
+            let profilePath = try Self.writeSandboxProfile(denyNetwork: true)
+            sandboxProfilePath = profilePath
+            spawnExecutable = "/usr/bin/sandbox-exec"
+            spawnArguments = ["/usr/bin/sandbox-exec", "-f", profilePath] + command.arguments
+        }
+        defer { if let sandboxProfilePath { try? FileManager.default.removeItem(atPath: sandboxProfilePath) } }
+
         let pipe = try Self.makePipe()
         var spawned = false
         defer {
@@ -89,7 +108,7 @@ public actor ProjectCommandRunner {
                 close(pipe.write)
             }
         }
-        let pid = try Self.spawn(executable: command.arguments[0], arguments: command.arguments, workingDirectory: root.path, outputFD: pipe.write)
+        let pid = try Self.spawn(executable: spawnExecutable, arguments: spawnArguments, workingDirectory: root.path, outputFD: pipe.write)
         spawned = true
         close(pipe.write)
         let invocation = Invocation(pid: pid)
@@ -180,6 +199,26 @@ public actor ProjectCommandRunner {
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
         return nil
+    }
+
+    private static func isSwiftPackageManagerInvocation(_ arguments: [String]) -> Bool {
+        guard let executable = arguments.first,
+              URL(fileURLWithPath: executable).lastPathComponent == "swift",
+              let subcommand = arguments.dropFirst().first(where: { !$0.hasPrefix("-") })
+        else { return false }
+        return ["build", "test", "run", "package"].contains(subcommand)
+    }
+
+    private static func writeSandboxProfile(denyNetwork: Bool) throws -> String {
+        var profile = "(version 1)\n(allow default)\n"
+        if denyNetwork { profile += "(deny network*)\n" }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fscode-sandbox-\(UUID().uuidString).sb")
+        do {
+            try profile.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            throw launchError(EIO)
+        }
+        return url.path
     }
 
     private func timeOut(runID: UUID) {

@@ -40,10 +40,11 @@ actor SwiftSymbolServer {
     }
 
     private func stopTransport() async {
-        await transport?.shutdown()
+        let oldTransport = transport
         transport = nil
         openDocumentURIs.removeAll()
         diagnosticsByURI.removeAll()
+        await oldTransport?.shutdown()
     }
 
     private func locate(method: String, relativePath: String, line: Int, column: Int, includeDeclaration: Bool?) async -> String {
@@ -56,6 +57,7 @@ actor SwiftSymbolServer {
         } catch {
             return "sourcekit-lsp could not be started: \(error)"
         }
+        defer { resetIdleTimer() }
         do {
             let uri = "file://\(fileURL.path)"
             try await openIfNeeded(transport, uri: uri, fileURL: fileURL)
@@ -80,7 +82,8 @@ actor SwiftSymbolServer {
     }
 
     private func ensureStarted() async throws -> LSPStdioTransport {
-        resetIdleTimer()
+        idleShutdownTask?.cancel()
+        idleShutdownTask = nil
         if let transport { return transport }
         let binary = try await locateSourceKitLSP()
         let transport = LSPStdioTransport()

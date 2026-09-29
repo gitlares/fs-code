@@ -29,6 +29,13 @@ final class TurnActivityDisclosureView: NSView {
         self.isExpanded = isExpanded
         super.init(frame: .zero)
 
+        let descriptor = Self.statusDescriptor(summary.activities)
+        let statusIcon = NSImageView()
+        statusIcon.image = NSImage(systemSymbolName: descriptor.symbol, accessibilityDescription: nil)
+        statusIcon.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        statusIcon.contentTintColor = descriptor.tint
+        statusIcon.setContentHuggingPriority(.required, for: .horizontal)
+
         button.title = Self.summaryText(summary.activities)
         button.image = NSImage(
             systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
@@ -38,12 +45,29 @@ final class TurnActivityDisclosureView: NSView {
         button.bezelStyle = .inline
         button.isBordered = false
         button.controlSize = .small
-        button.font = .systemFont(ofSize: 11, weight: .medium)
+        button.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         button.contentTintColor = .secondaryLabelColor
         button.target = self
         button.action = #selector(toggle)
         button.alignment = .left
-        button.setAccessibilityLabel("Turn activity: \(button.title)")
+        button.setAccessibilityLabel("Turn activity: \(button.title), \(descriptor.accessibilityText)")
+
+        // A bordered, tinted chip reads as an interactive terminal-style control
+        // rather than loose caption text; reuses the same fill/border recipe as
+        // the composer and user bubble so the app has one consistent "chip" look.
+        let chip = ChipBackgroundView(radius: Radius.small)
+        let chipRow = NSStackView(views: [statusIcon, button])
+        chipRow.orientation = .horizontal
+        chipRow.alignment = .centerY
+        chipRow.spacing = 5
+        chipRow.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(chipRow)
+        NSLayoutConstraint.activate([
+            chipRow.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 7),
+            chipRow.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -7),
+            chipRow.topAnchor.constraint(equalTo: chip.topAnchor, constant: 4),
+            chipRow.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -4)
+        ])
 
         details.orientation = .vertical
         details.alignment = .leading
@@ -55,7 +79,7 @@ final class TurnActivityDisclosureView: NSView {
         }
         details.isHidden = !isExpanded
 
-        let stack = NSStackView(views: [button, details])
+        let stack = NSStackView(views: [chip, details])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
@@ -87,13 +111,27 @@ final class TurnActivityDisclosureView: NSView {
             if !result.contains(phase) { result.append(phase) }
         }.sorted { $0.rawValue < $1.rawValue }
         let phaseText = phases.count == 1 ? phaseName(phases[0]) : "Work"
-        let status = activities.contains(where: { $0.completedAt == nil })
-            ? "Running"
-            : (activities.last(where: { $0.status?.isEmpty == false })?.status ?? "Completed")
         let milliseconds = activities.compactMap(\.durationMs).reduce(0.0) { $0 + Double($1) }
         let duration = milliseconds > 0 ? " · \(durationText(Int(min(milliseconds, Double(Int.max)))))" : ""
         let count = activities.count == 1 ? "1 step" : "\(activities.count) steps"
-        return "\(phaseText) · \(count) · \(status.capitalized)\(duration)"
+        return "\(phaseText) · \(count)\(duration)"
+    }
+
+    /// Status is conveyed by icon shape (not color alone, for contrast/color-blind
+    /// accessibility): a dotted circle while running, an exclamation while failed,
+    /// a stop glyph when interrupted, a checkmark otherwise.
+    private static func statusDescriptor(_ activities: [ConversationTurnActivity]) -> (symbol: String, tint: NSColor, accessibilityText: String) {
+        if activities.contains(where: { $0.completedAt == nil }) {
+            return ("circle.dotted", .secondaryLabelColor, "Running")
+        }
+        let status = (activities.last(where: { $0.status?.isEmpty == false })?.status ?? "completed").lowercased()
+        if status.contains("fail") {
+            return ("exclamationmark.circle.fill", .systemRed, "Failed")
+        }
+        if status.contains("interrupt") {
+            return ("stop.circle.fill", .secondaryLabelColor, "Interrupted")
+        }
+        return ("checkmark.circle.fill", .systemGreen, "Completed")
     }
 
     private static func detailView(for activity: ConversationTurnActivity) -> NSView {
@@ -157,6 +195,40 @@ final class TurnActivityDisclosureView: NSView {
     private static func durationText(_ milliseconds: Int) -> String {
         if milliseconds < 1_000 { return "\(milliseconds) ms" }
         return String(format: "%.1f s", Double(milliseconds) / 1_000)
+    }
+}
+
+/// Shared "chip" background — quaternary fill + hairline border, discreetly
+/// rounded — for structured content (tool-call summaries, code) as distinct
+/// from open assistant prose. Refreshes its `CALayer` colors on light/dark
+/// switches, since `CGColor` doesn't track appearance changes on its own.
+@MainActor
+final class ChipBackgroundView: NSView {
+    private let radius: CGFloat
+
+    init(radius: CGFloat) {
+        self.radius = radius
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = radius
+        layer?.cornerCurve = .continuous
+        translatesAutoresizingMaskIntoConstraints = false
+        updateColor()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColor()
+    }
+
+    private func updateColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
+            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.borderWidth = 1
+        }
     }
 }
 
@@ -387,7 +459,18 @@ final class TurnFilesDisclosureView: NSView {
         expanded = isExpanded
         details.isHidden = !isExpanded
         toggle.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: isExpanded ? "Hide modified files" : "Show modified files")
-        let stack = NSStackView(views: [toggle, details])
+
+        let chip = ChipBackgroundView(radius: Radius.small)
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(toggle)
+        NSLayoutConstraint.activate([
+            toggle.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 7),
+            toggle.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -7),
+            toggle.topAnchor.constraint(equalTo: chip.topAnchor, constant: 2),
+            toggle.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -2)
+        ])
+
+        let stack = NSStackView(views: [chip, details])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 3; stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor)])
@@ -431,6 +514,9 @@ final class AgentChangeOpenButton: NSButton {
 final class ComposerTextView: NSTextView {
     var onCommandReturn: (() -> Void)?
     var onFileDrop: (([URL]) -> Void)?
+    /// Lets an open popup (e.g. the "@file" mention list) claim a bare Return
+    /// before it reaches `onCommandReturn`. Return `true` to consume the key.
+    var onReturnOverride: (() -> Bool)?
     var placeholder = "" {
         didSet { needsDisplay = true }
     }
@@ -474,6 +560,7 @@ final class ComposerTextView: NSTextView {
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if isReturn, modifiers.isEmpty, !hasMarkedText() {
+            if onReturnOverride?() == true { return }
             onCommandReturn?()
             return
         }
