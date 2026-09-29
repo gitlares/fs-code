@@ -27,7 +27,7 @@ enum ChatAttachmentError: LocalizedError, Equatable {
         switch self {
         case .invalidPath: "Choose a valid project-relative path or regular external file."
         case .unsupportedFile: "Only regular text files can be attached."
-        case .fileTooLarge: "Each external attachment is limited to 64 KiB and the chat total is limited to 256 KiB."
+        case .fileTooLarge: "Each external attachment is limited to 1 MB and the chat total is limited to 4 MB."
         case .invalidUTF8: "Only UTF-8 text files can be attached."
         case .limitReached: "A chat can contain up to 8 attachments."
         case .unavailable: "Saved chat attachments could not be read safely."
@@ -40,8 +40,12 @@ enum ChatAttachmentError: LocalizedError, Equatable {
 /// sent implicitly. The sidecar is intentionally separate from conversation history.
 final class ChatAttachmentStore {
     static let maximumAttachments = 8
-    static let maximumExternalBytes = 64 * 1_024
-    static let maximumTotalSnapshotBytes = 256 * 1_024
+    // Matches the "one text file" ceiling already used elsewhere in the app
+    // (NativeProjectTools.readText, ContextStore.maximumRuleBytes) rather than
+    // picking a new number — 64 KiB was conservative relative to what current
+    // model context windows can actually hold.
+    static let maximumExternalBytes = 1_048_576
+    static let maximumTotalSnapshotBytes = 4 * 1_048_576
     private static let maximumSidecarBytes = (maximumTotalSnapshotBytes * 6) + 16_384
 
     private struct StoredAttachment: Codable {

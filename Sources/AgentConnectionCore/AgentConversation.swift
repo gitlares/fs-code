@@ -2451,8 +2451,11 @@ public final class AgentConversationManager {
             refreshVisibleConversation()
             if status == "completed", !active.stopRequested, !active.outputTruncated {
                 persistAfterEvent(drainConversation: (active.conversationID, active.profileID))
+            } else if case .failed(let message) = activity {
+                pauseQueue(message: "Queue paused: \(message)")
+                persistAfterEvent()
             } else {
-                pauseQueue(message: "Queue paused because the current response did not complete successfully.")
+                pauseQueue(message: "Queue paused because the current response was stopped.")
                 persistAfterEvent()
             }
             notifyObservers()
@@ -2650,7 +2653,11 @@ public final class AgentConversationManager {
         if responseMessage == "The provider rate limit was reached. Wait a moment or switch to another connection." {
             return "Queue paused because the provider rate limit was reached. Wait a moment or switch to another connection."
         }
-        return "Queue paused because the current response failed."
+        guard !responseMessage.isEmpty else { return "Queue paused because the current response failed." }
+        // Carry the actual failure text instead of a generic placeholder — it's
+        // already shown once in the status row (see `activity = .failed(...)`
+        // right before this is called), so repeating it here isn't a new exposure.
+        return "Queue paused: \(responseMessage)"
     }
 
     private func pauseQueue(message: String) {

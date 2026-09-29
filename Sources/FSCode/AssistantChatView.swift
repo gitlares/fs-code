@@ -927,7 +927,11 @@ final class AssistantChatView: NSView, NSTableViewDataSource, NSTableViewDelegat
         let rowHeight = CGFloat(24)
         let spacing = CGFloat(max(0, queued.count - 1) * 3)
         queueScrollHeightConstraint?.constant = min(94, CGFloat(queued.count) * rowHeight + spacing)
-        queueContainer.isHidden = queued.isEmpty && !manager.queueIsPaused && manager.queueError == nil
+        // A paused/error flag with nothing left queued has nothing to protect — the
+        // failed turn itself is already reported in the status row above the
+        // composer. Without this, the banner could outlive the failure it
+        // described and sit there indefinitely with no queued messages behind it.
+        queueContainer.isHidden = queued.isEmpty
         revealPendingQueueIfNeeded()
     }
 
